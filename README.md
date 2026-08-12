@@ -8,13 +8,13 @@ at `src/App.jsx`, plus Capacitor config to package it as a native Android/iOS ap
 ```bash
 npm install
 ```
-
 ## 2. Preview in the browser first (sanity check)
 
 ```bash
 npm run dev
 ```
 Open the local URL it prints. Confirm everything looks right before packaging.
+
 
 To preview on your **phone** over Wi-Fi while developing:
 ```bash

@@ -3,6 +3,7 @@ name: Build Android APK
 on:
   push:
     branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -18,12 +19,10 @@ jobs:
           node-version: 18
 
       - name: Install Dependencies
-        run: |
-          npm install
+        run: npm install
 
-      - name: Build Web App (Vite)
-        run: |
-          npm run build
+      - name: Build Web App
+        run: npm run build
 
       - name: Add & Sync Capacitor Android
         run: |

@@ -64,6 +64,137 @@ const FONT_SANS = "'Inter', 'Segoe UI', system-ui, sans-serif";
 const now = Date.now();
 const H = 3600000;
 
+/* ---------------------------------------------------------------------- */
+/*  2-HOUR REMINDER SYSTEM — constants & side-effect helpers               */
+/* ---------------------------------------------------------------------- */
+const REMINDER_INTERVAL_MS = 2 * H;
+/* how often we poll for a newly-crossed 2h boundary. Keep this well under
+   REMINDER_INTERVAL_MS — 60s is plenty and cheap. */
+const REMINDER_POLL_MS = 60 * 1000;
+
+/* ---------------------------------------------------------------------- */
+/*  SECTION-WISE FAULT SELECTION SYSTEM                                    */
+/*  Each main fault category maps to a checklist of specific technical     */
+/*  sub-sections (bilingual EN/Tamil labels). Categories not in this map   */
+/*  (e.g. "Other") simply render no sub-checklist.                         */
+/* ---------------------------------------------------------------------- */
+const SUB_FAULTS = {
+  "Motherboard Fault": [
+    { en: "DC-DC Converter Section Fault", ta: "DC-DC செக்ஷன் ஃபால்ட்" },
+    { en: "Audio / Amp Section Fault", ta: "ஆம்ப் / ஆடியோ செக்ஷன் ஃபால்ட்" },
+    { en: "Power Supply Input Section Fault", ta: "பவர் சப்ளை செக்ஷன் ஃபால்ட்" },
+    { en: "Processor / RAM Heat Issue", ta: "புராசஸர் / ரேம் பிரச்சனை" },
+    { en: "Software / EMMC IC Issue", ta: "சாஃப்ட்வேர் / EMMC ஃபால்ட்" },
+  ],
+  "Display Fault": [
+    { en: "COF Bonding Needed", ta: "காஃப் பாண்டிங் செய்ய வேண்டும்" },
+    { en: "Scalar Board Fault", ta: "ஸ்கேலர் போர்டு கம்ப்ளைன்ட்" },
+    { en: "Booster IC / Section Fault", ta: "பூஸ்டிங் செக்ஷன் ஃபால்ட்" },
+    { en: "Pixel Shorting", ta: "பிக்சல் ஷார்ட்" },
+    { en: "CKV / Gate Signal Shorting", ta: "கேட் சிக்னல் ஷார்ட்" },
+  ],
+  "SMPS / Power Supply Board": [
+    { en: "Primary Switching Section Fault", ta: "பிரைமரி ஸ்விட்சிங் செக்ஷன்" },
+    { en: "Secondary Output Voltage Section Fault", ta: "செகண்டரி வோல்டேஜ் ஃபால்ட்" },
+    { en: "PFC Circuit Fault", ta: "PFC சர்க்யூட் ஃபால்ட்" },
+    { en: "Standby 5V/3.3V Line Fault", ta: "ஸ்டாண்ட்பை லைன் ஃபால்ட்" },
+  ],
+  "Backlight Fault": [
+    { en: "LED Strip Burning / Damage", ta: "எல்இடி ஸ்ட்ரிப் பர்ன் / சேதம்" },
+    { en: "Backlight Driver IC Fault", ta: "பேக்லைட் டிரைவர் ஐசி ஃபால்ட்" },
+    { en: "Voltage Inverter Board Issue", ta: "இன்வெர்ட்டர் போர்டு பிரச்சனை" },
+  ],
+};
+
+/* Main fault categories offered at intake / update — the four detailed
+   ones above, plus a few catch-alls that have no sub-checklist. */
+const DEFAULT_FAULTS = [
+  ...Object.keys(SUB_FAULTS),
+  "No Power / Dead Set",
+  "Sound Not Working",
+  "Panel / Screen Damage",
+  "Other",
+];
+
+const REMINDER_STATUS_OPTIONS = [
+  { label: "In Progress", jobStatus: "In Progress" },
+  { label: "Spare Ordered", jobStatus: "In Progress" },
+  { label: "Ready for Delivery", jobStatus: "Completed" },
+  { label: "Completed", jobStatus: "Completed" },
+];
+
+/* Closing line appended to the "detailed status update" WhatsApp message,
+   keyed by the status the technician picked in the reminder popup. */
+const STATUS_CLOSING_NOTE = {
+  "In Progress": "We are currently working on component replacement.",
+  "Spare Ordered": "We have ordered the required spare part and will update you once it arrives.",
+  "Ready for Delivery": "Your TV is ready for delivery. Please visit at your convenience.",
+  Completed: "Repair work is completed. Please collect your TV at your convenience.",
+};
+
+/* Builds the templated WhatsApp message for a reminder. Stage 1 = initial
+   diagnosis prompt (fired soon after intake); stage 2+ = a detailed
+   section-wise status update once specific sub-faults have been logged. */
+function buildReminderMessage(reminder, statusLabel) {
+  const subText = reminder.subFaults && reminder.subFaults.length ? ` (${reminder.subFaults.join(", ")})` : "";
+  if (reminder.stage === 1) {
+    return `Hello, your TV (Job #${reminder.jobId}) has been inspected. Identified issue: ${reminder.fault}${subText}. We will update you shortly on progress.`;
+  }
+  const issues = reminder.subFaults && reminder.subFaults.length ? reminder.subFaults.join(", ") : reminder.fault;
+  const closing = STATUS_CLOSING_NOTE[statusLabel] || "We will keep you posted.";
+  return `Hello! Status update for TV Job #${reminder.jobId}: Main Category: ${reminder.fault}. Identified Issues: ${issues}. ${closing}`;
+}
+
+/* Builds a wa.me deep link with a pre-filled message. Indian 10-digit
+   numbers get the +91 country code prefixed automatically. */
+function waLink(phone, message) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  const withCountry = digits.length === 10 ? `91${digits}` : digits;
+  return `https://wa.me/${withCountry}?text=${encodeURIComponent(message)}`;
+}
+
+/* Short triple-beep alarm using the Web Audio API — no external audio
+   file/asset needed, so it works the moment the tab has had a user
+   gesture (required by browser autoplay policy). */
+function playAlarmBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const t0 = ctx.currentTime;
+    [0, 0.28, 0.56].forEach((offset) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.setValueAtTime(1046.5, t0 + offset);
+      gain.gain.setValueAtTime(0.0001, t0 + offset);
+      gain.gain.exponentialRampToValueAtTime(0.28, t0 + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + offset + 0.22);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0 + offset);
+      osc.stop(t0 + offset + 0.24);
+    });
+    setTimeout(() => ctx.close(), 1400);
+  } catch {
+    /* audio isn't critical — swallow so the reminder still fires */
+  }
+}
+
+/* Fire a native browser/OS notification if permission has been granted.
+   Safe no-op in environments without the Notification API (e.g. some
+   in-app WebViews) or if the user hasn't granted permission yet. */
+function fireBrowserNotification(title, body, tag) {
+  try {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission === "granted") {
+      const n = new Notification(title, { body, tag, renotify: true });
+      n.onclick = () => { window.focus(); n.close(); };
+    }
+  } catch {
+    /* ignore — notification failures shouldn't break the app */
+  }
+}
+
 const SEED_TECHS = [
   { id: "T1", name: "Ravi Kumar", phone: "9876500011", specialty: "Panel & Backlight" },
   { id: "T2", name: "Suresh Babu", phone: "9876500022", specialty: "Power & SMPS" },
@@ -87,7 +218,7 @@ const SEED_JOBS = [
   {
     id: "JC-1001", customer: "Anitha Raman", phone: "9843211001",
     brand: "Samsung", model: "UA43T5350", issue: "No display, faint backlight visible",
-    accessories: "Remote, power cable", estimate: 2200,
+    accessories: "Remote, power cable", estimate: 2200, fault: "Backlight Fault", subFaults: ["LED Strip Burning / Damage"], remindersSent: 0,
     intake: now - 5.5 * H, status: "Pending", assignedTech: null, partsUsed: [],
     createdBy: "frontdesk",
     updates: [{ ts: now - 5.5 * H, by: "Front Desk", note: "Job card created on intake.", status: "Pending" }],
@@ -96,7 +227,7 @@ const SEED_JOBS = [
   {
     id: "JC-1002", customer: "Mohammed Irfan", phone: "9843211002",
     brand: "LG", model: "43LM6360", issue: "Vertical lines across screen",
-    accessories: "None", estimate: 3200,
+    accessories: "None", estimate: 3200, fault: "Display Fault", subFaults: ["Pixel Shorting", "CKV / Gate Signal Shorting"], remindersSent: 0,
     intake: now - 3.2 * H, status: "In Progress", assignedTech: "T1", partsUsed: [],
     createdBy: "frontdesk",
     updates: [
@@ -108,7 +239,7 @@ const SEED_JOBS = [
   {
     id: "JC-1003", customer: "Deepa Selvam", phone: "9843211003",
     brand: "Sony", model: "KLV-32R422", issue: "TV not powering on",
-    accessories: "Power cable only", estimate: 1400,
+    accessories: "Power cable only", estimate: 1400, fault: "SMPS / Power Supply Board", subFaults: ["Primary Switching Section Fault"], remindersSent: 0,
     intake: now - 26 * H, status: "Completed", assignedTech: "T2", partsUsed: [{ partId: "P3", qty: 1 }],
     createdBy: "frontdesk",
     updates: [
@@ -121,7 +252,7 @@ const SEED_JOBS = [
   {
     id: "JC-0998", customer: "Karthik Subramaniam", phone: "9843210998",
     brand: "Mi", model: "L50M6-EI", issue: "Cracked panel, physical damage",
-    accessories: "Remote", estimate: 5200,
+    accessories: "Remote", estimate: 5200, fault: "Panel / Screen Damage", subFaults: [], remindersSent: 0,
     intake: now - 50 * H, status: "Delivered", assignedTech: "T3", partsUsed: [{ partId: "P2", qty: 1 }],
     createdBy: "frontdesk",
     updates: [
@@ -368,9 +499,13 @@ export default function AitechLabCRM() {
   const [printInvoice, setPrintInvoice] = useState(null);
   const [showAlerts, setShowAlerts] = useState(false);
   const [confirmDeleteJob, setConfirmDeleteJob] = useState(null);
+  const [reminders, setReminders] = useState([]); // active 2-hour reminders awaiting technician action
+  const [popupReminder, setPopupReminder] = useState(null); // reminder shown as an auto-opened modal
 
   const toastTimer = useRef(null);
   const prevOverdueCount = useRef(null);
+  const jobsRef = useRef(jobs);
+  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
 
   /* live "time ago" ticker */
   useEffect(() => {
@@ -397,6 +532,92 @@ export default function AitechLabCRM() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobs]);
 
+  /* ask for browser/OS notification permission once, up front, so the
+     2-hour reminders can actually pop a native alert */
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  /* ---------------------------------------------------------------- */
+  /*  AUTOMATED 2-HOUR REMINDER ENGINE                                  */
+  /*  Every REMINDER_POLL_MS we check each job that is NOT Completed/   */
+  /*  Delivered. Once (now - intake) crosses another multiple of 2h,    */
+  /*  we fire a browser notification + alarm sound and drop a reminder  */
+  /*  card into the bell menu. Stage 1 = initial diagnosis prompt;      */
+  /*  stage 2+ = status-update prompt. Marking a job Completed (or      */
+  /*  Delivered) stops the cycle for that Job ID immediately.           */
+  /* ---------------------------------------------------------------- */
+  useEffect(() => {
+    const t = setInterval(() => {
+      const currentJobs = jobsRef.current;
+      const newReminders = [];
+      const updated = currentJobs.map((j) => {
+        if (j.status === "Completed" || j.status === "Delivered") return j;
+        const elapsedStages = Math.floor((Date.now() - j.intake) / REMINDER_INTERVAL_MS);
+        const sent = j.remindersSent || 0;
+        if (elapsedStages > sent) {
+          const nextStage = sent + 1;
+          newReminders.push({
+            id: `${j.id}-r${nextStage}`,
+            jobId: j.id, stage: nextStage, ts: Date.now(), jobStatus: j.status,
+            fault: j.fault, subFaults: j.subFaults || [], phone: j.phone,
+            customer: j.customer, brand: j.brand, model: j.model,
+          });
+          return { ...j, remindersSent: nextStage };
+        }
+        return j;
+      });
+
+      if (newReminders.length) {
+        setJobs(updated);
+        newReminders.forEach((r) => {
+          playAlarmBeep();
+          fireBrowserNotification(
+            `Job #${r.jobId} — 2-hour check-in`,
+            r.stage === 1
+              ? `Send initial fault diagnosis (${r.fault}) to ${r.customer}?`
+              : `Update status for Job #${r.jobId} (${r.fault}) and notify ${r.customer}.`,
+            r.jobId
+          );
+        });
+        setReminders((rs) => {
+          const jobIds = newReminders.map((r) => r.jobId);
+          return [...newReminders, ...rs.filter((r) => !jobIds.includes(r.jobId))];
+        });
+        /* Section-wise detailed pop-up: for a job that's actively In
+           Progress, surface a full modal (Job ID + main fault + every
+           sub-section checked) instead of making the technician dig
+           through the bell menu. Most recent one wins if several fire
+           in the same poll. */
+        const inProgressReminder = [...newReminders].reverse().find((r) => r.jobStatus === "In Progress");
+        if (inProgressReminder) setPopupReminder(inProgressReminder);
+        pushToast(
+          `⏰ ${newReminders.length} job${newReminders.length === 1 ? "" : "s"} due for a 2-hour customer update.`,
+          "alert"
+        );
+      }
+    }, REMINDER_POLL_MS);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* auto-stop: the moment a job's status flips to Completed/Delivered
+     (from anywhere in the app), drop any reminder card still showing
+     for it — no more timers, no more badge count for that Job ID. */
+  useEffect(() => {
+    setReminders((rs) => rs.filter((r) => {
+      const j = jobs.find((jj) => jj.id === r.jobId);
+      return j && j.status !== "Completed" && j.status !== "Delivered";
+    }));
+    setPopupReminder((r) => {
+      if (!r) return r;
+      const j = jobs.find((jj) => jj.id === r.jobId);
+      return j && j.status !== "Completed" && j.status !== "Delivered" ? r : null;
+    });
+  }, [jobs]);
+
   function pushToast(message, kind = "sms") {
     setToast({ message, kind, id: Math.random() });
     clearTimeout(toastTimer.current);
@@ -406,6 +627,30 @@ export default function AitechLabCRM() {
   function sendSms(phone, jobId, message) {
     setSmsLog((l) => [{ ts: Date.now(), phone, jobId, message }, ...l]);
     pushToast(`SMS → ${phone}: ${message}`, "sms");
+  }
+
+  /* Handles the "Send Customer Update via WhatsApp/SMS" action from a
+     reminder card: builds the templated message, opens wa.me in a new
+     tab, logs it, and (for stage 2+ status updates) also applies the
+     chosen status to the job so the reminder cycle reflects reality. */
+  function sendWhatsAppUpdate(reminder, statusLabel) {
+    const message = buildReminderMessage(reminder, statusLabel);
+
+    window.open(waLink(reminder.phone, message), "_blank", "noopener,noreferrer");
+    setSmsLog((l) => [{ ts: Date.now(), phone: reminder.phone, jobId: reminder.jobId, message: `[WhatsApp] ${message}` }, ...l]);
+    pushToast(`WhatsApp update opened for ${reminder.jobId}.`, "sms");
+
+    if (reminder.stage > 1 && statusLabel) {
+      const opt = REMINDER_STATUS_OPTIONS.find((o) => o.label === statusLabel);
+      if (opt) updateJob(reminder.jobId, { status: opt.jobStatus, note: `Reminder update — customer notified: ${statusLabel}.`, by: "Reminder System" });
+    }
+    setReminders((rs) => rs.filter((r) => r.id !== reminder.id));
+    setPopupReminder((r) => (r && r.id === reminder.id ? null : r));
+  }
+
+  function dismissReminder(reminderId) {
+    setReminders((rs) => rs.filter((r) => r.id !== reminderId));
+    setPopupReminder((r) => (r && r.id === reminderId ? null : r));
   }
 
   const techMap = useMemo(() => Object.fromEntries(technicians.map((t) => [t.id, t])), [technicians]);
@@ -434,7 +679,7 @@ export default function AitechLabCRM() {
     const id = nextJobId();
     const job = {
       id, ...data, intake: Date.now(), status: "Pending", assignedTech: null,
-      partsUsed: [], createdBy: "frontdesk", invoiced: false,
+      partsUsed: [], createdBy: "frontdesk", invoiced: false, remindersSent: 0,
       updates: [{ ts: Date.now(), by: "Front Desk", note: "Job card created on intake.", status: "Pending" }],
     };
     setJobs((j) => [job, ...j]);
@@ -449,7 +694,7 @@ export default function AitechLabCRM() {
     if (job && tech) sendSms(job.phone, jobId, `Hi ${job.customer}, technician ${tech.name} has been assigned to your ${job.brand} ${job.model} repair (${jobId}).`);
   }
 
-  function updateJob(jobId, { status, note, partsUsedDelta, by }) {
+  function updateJob(jobId, { status, note, partsUsedDelta, by, fault, subFaults }) {
     setJobs((js) =>
       js.map((j) => {
         if (j.id !== jobId) return j;
@@ -464,6 +709,8 @@ export default function AitechLabCRM() {
         }
         return {
           ...j, status: status || j.status, partsUsed,
+          fault: fault !== undefined ? fault : j.fault,
+          subFaults: subFaults !== undefined ? subFaults : j.subFaults,
           updates: [...j.updates, { ts: Date.now(), by, note, status: status || j.status }],
         };
       })
@@ -479,7 +726,8 @@ export default function AitechLabCRM() {
       const parts_txt = partsUsedDelta && partsUsedDelta.length
         ? ` Parts used: ${partsUsedDelta.map((d) => `${partMap[d.partId]?.name} x${d.qty}`).join(", ")}.`
         : "";
-      sendSms(job.phone, jobId, `Hi ${job.customer}, update on ${jobId}: status is now "${status || job.status}". ${note || ""}${parts_txt}`.trim());
+      const fault_txt = subFaults && subFaults.length ? ` Section fault(s): ${subFaults.join(", ")}.` : "";
+      sendSms(job.phone, jobId, `Hi ${job.customer}, update on ${jobId}: status is now "${status || job.status}". ${note || ""}${parts_txt}${fault_txt}`.trim());
     }
   }
 
@@ -684,6 +932,9 @@ export default function AitechLabCRM() {
           showAlerts={showAlerts}
           setShowAlerts={setShowAlerts}
           overdueJobs={overdueJobs}
+          reminders={reminders}
+          onSendWhatsApp={sendWhatsAppUpdate}
+          onDismissReminder={dismissReminder}
           onManualRefresh={() => {
             setLastRefresh(Date.now());
             pushToast(`Dashboard refreshed manually. ${overdueJobs.length} order(s) need attention.`, "alert");
@@ -762,6 +1013,16 @@ export default function AitechLabCRM() {
             </Btn>
             <Btn variant="outline" onClick={() => setConfirmDeleteJob(null)}>Cancel</Btn>
           </div>
+        </Modal>
+      )}
+
+      {popupReminder && (
+        <Modal title={`2-Hour Reminder — Job #${popupReminder.jobId}`} onClose={() => setPopupReminder(null)} width={440}>
+          <ReminderPopupBody
+            reminder={popupReminder}
+            onSend={(statusLabel) => sendWhatsAppUpdate(popupReminder, statusLabel)}
+            onClose={() => setPopupReminder(null)}
+          />
         </Modal>
       )}
 
@@ -857,13 +1118,22 @@ function RoleSelect({ technicians, onSelect }) {
 /* ---------------------------------------------------------------------- */
 /*  TOP BAR                                                                 */
 /* ---------------------------------------------------------------------- */
-function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAlerts, overdueJobs, onManualRefresh, onOpenNav }) {
+function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAlerts, overdueJobs, reminders, onSendWhatsApp, onDismissReminder, onManualRefresh, onOpenNav }) {
   const titles = { admin: "Dashboard", frontdesk: "Front Desk", technician: "Technician Bench" };
+  const reminderCount = reminders.length;
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
       padding: "14px 22px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.panel, gap: 10, flexWrap: "wrap",
     }}>
+      <style>{`
+        @keyframes bellPulse {
+          0%   { transform: scale(1);    box-shadow: 0 0 0 0 ${COLORS.red}66; }
+          70%  { transform: scale(1.12); box-shadow: 0 0 0 6px ${COLORS.red}00; }
+          100% { transform: scale(1);    box-shadow: 0 0 0 0 ${COLORS.red}00; }
+        }
+        .bell-badge-pulse { animation: bellPulse 1.4s ease-in-out infinite; }
+      `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <button
           className="hamburger-btn"
@@ -890,23 +1160,38 @@ function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAler
             border: `1px solid ${COLORS.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
           }}
         >
-          <Bell size={15} color={overdueCount ? COLORS.amber : COLORS.faint} />
-          {overdueCount > 0 && (
-            <span style={{
-              position: "absolute", top: -4, right: -4, background: COLORS.red, color: "#fff",
-              fontSize: 9.5, fontWeight: 700, borderRadius: 999, minWidth: 16, height: 16,
-              display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_MONO, padding: "0 3px",
-            }}>
-              {overdueCount}
+          <Bell size={15} color={overdueCount || reminderCount ? COLORS.amber : COLORS.faint} />
+          {(reminderCount > 0 || overdueCount > 0) && (
+            <span
+              className={reminderCount > 0 ? "bell-badge-pulse" : ""}
+              style={{
+                position: "absolute", top: -4, right: -4, background: COLORS.red, color: "#fff",
+                fontSize: 9.5, fontWeight: 700, borderRadius: 999, minWidth: 16, height: 16,
+                display: "flex", alignItems: "center", justifyContent: "center", fontFamily: FONT_MONO, padding: "0 3px",
+              }}
+            >
+              {reminderCount > 0 ? reminderCount : overdueCount}
             </span>
           )}
         </button>
         {showAlerts && (
           <div style={{
-            position: "absolute", top: 42, right: 0, width: "min(300px, 88vw)", background: COLORS.panel2,
+            position: "absolute", top: 42, right: 0, width: "min(330px, 90vw)", background: COLORS.panel2,
             border: `1px solid ${COLORS.borderLight}`, borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)",
-            zIndex: 40, padding: 12,
+            zIndex: 40, padding: 12, maxHeight: "70vh", overflowY: "auto",
           }}>
+            {reminderCount > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: COLORS.text, display: "flex", alignItems: "center", gap: 6 }}>
+                  <Clock size={12} color={COLORS.amber} /> 2-Hour Reminders
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {reminders.map((r) => (
+                    <ReminderRow key={r.id} reminder={r} onSend={onSendWhatsApp} onDismiss={onDismissReminder} />
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: COLORS.text }}>
               Overdue pending orders (&gt;2h)
             </div>
@@ -925,6 +1210,173 @@ function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAler
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/*  REMINDER ROW — one card per job inside the bell dropdown.              */
+/*  Stage 1: initial fault-diagnosis prompt, single WhatsApp send button.  */
+/*  Stage 2+: technician picks a current status, then sends the update.   */
+/* ---------------------------------------------------------------------- */
+function ReminderRow({ reminder, onSend, onDismiss }) {
+  const [status, setStatus] = useState(REMINDER_STATUS_OPTIONS[0].label);
+  const isInitial = reminder.stage === 1;
+
+  return (
+    <Panel style={{ padding: 10, border: `1px solid ${COLORS.amber}55`, background: `${COLORS.amberDim}33` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12 }}>Job #{reminder.jobId}</span>
+        <button onClick={() => onDismiss(reminder.id)} style={{ background: "none", border: "none", color: COLORS.faint, cursor: "pointer", padding: 0 }}>
+          <X size={13} />
+        </button>
+      </div>
+      <div style={{ fontSize: 11.5, color: COLORS.text, lineHeight: 1.4, marginBottom: 6 }}>
+        {isInitial
+          ? <>Send initial fault diagnosis (<strong>{reminder.fault}</strong>) to {reminder.customer}?</>
+          : <>Reminder #{reminder.stage}: update current status and notify {reminder.customer}.</>}
+      </div>
+      {reminder.subFaults && reminder.subFaults.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+          {reminder.subFaults.map((sf) => (
+            <span key={sf} style={{ fontSize: 10, background: COLORS.panel2, color: COLORS.teal, padding: "2px 7px", borderRadius: 999, border: `1px solid ${COLORS.border}` }}>{sf}</span>
+          ))}
+        </div>
+      )}
+      {!isInitial && (
+        <Select value={status} onChange={(e) => setStatus(e.target.value)} style={{ marginBottom: 8, fontSize: 12 }}>
+          {REMINDER_STATUS_OPTIONS.map((o) => <option key={o.label} value={o.label}>{o.label}</option>)}
+        </Select>
+      )}
+      <Btn size="sm" variant="teal" style={{ width: "100%" }} onClick={() => onSend(reminder, isInitial ? undefined : status)}>
+        <MessageSquare size={12} /> {isInitial ? "Send Customer Update via WhatsApp/SMS" : "Send Status Update via WhatsApp/SMS"}
+      </Btn>
+    </Panel>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/*  REMINDER POPUP — auto-opened modal for a 2-hour check-in on a job     */
+/*  that's actively In Progress. Shows the Job ID, main fault category,   */
+/*  and every section-wise sub-fault checked, then lets the technician    */
+/*  pick a status and fire off the detailed WhatsApp update in one tap.   */
+/* ---------------------------------------------------------------------- */
+function ReminderPopupBody({ reminder, onSend, onClose }) {
+  const [status, setStatus] = useState(REMINDER_STATUS_OPTIONS[0].label);
+  return (
+    <div>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "10px 12px",
+        background: `${COLORS.redDim}55`, border: `1px solid ${COLORS.red}55`, borderRadius: 8,
+      }}>
+        <AlertTriangle size={15} color={COLORS.red} style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.4 }}>
+          This job has been in progress for over {reminder.stage * 2}h without a customer update.
+        </span>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 4 }}>Job ID</div>
+      <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 16, marginBottom: 14 }}>#{reminder.jobId}</div>
+
+      <div style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 6 }}>Main Fault Category</div>
+      <div style={{
+        display: "inline-block", fontSize: 12, fontWeight: 700, background: COLORS.amberDim, color: COLORS.amber,
+        padding: "4px 11px", borderRadius: 999, marginBottom: 16,
+      }}>
+        {reminder.fault}
+      </div>
+
+      <div style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 8 }}>Sub-Sections Checked</div>
+      {reminder.subFaults && reminder.subFaults.length > 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 18 }}>
+          {reminder.subFaults.map((sf) => (
+            <div key={sf} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12.5, color: COLORS.text, lineHeight: 1.4 }}>
+              <CheckCircle2 size={14} color={COLORS.teal} style={{ flexShrink: 0, marginTop: 1 }} /> {sf}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: COLORS.faint, marginBottom: 18 }}>No specific sub-sections logged yet for this job.</div>
+      )}
+
+      <Field label="Current Status to Send">
+        <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+          {REMINDER_STATUS_OPTIONS.map((o) => <option key={o.label} value={o.label}>{o.label}</option>)}
+        </Select>
+      </Field>
+
+      <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
+        <Btn variant="teal" onClick={() => onSend(status)}>
+          <MessageSquare size={14} /> Send Detailed Update to Customer
+        </Btn>
+        <Btn variant="outline" onClick={onClose}>Close</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/*  FAULT SELECTOR — main category dropdown + dynamic section-wise        */
+/*  sub-fault checklist. Reused at job intake and by technicians when     */
+/*  updating a job. Big tap targets for mobile; bilingual EN/Tamil        */
+/*  labels on every checkbox.                                             */
+/* ---------------------------------------------------------------------- */
+function FaultSelector({ fault, setFault, subFaults, setSubFaults }) {
+  const options = SUB_FAULTS[fault] || [];
+
+  const toggle = (key) => {
+    setSubFaults((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Field label="Main Fault Category">
+        <Select value={fault} onChange={(e) => { setFault(e.target.value); setSubFaults([]); }}>
+          {DEFAULT_FAULTS.map((f) => <option key={f} value={f}>{f}</option>)}
+        </Select>
+      </Field>
+
+      {options.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 600, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 8 }}>
+            Section-wise Sub-Faults — {fault}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {options.map((o) => {
+              const checked = subFaults.includes(o.en);
+              return (
+                <label
+                  key={o.en}
+                  onClick={() => toggle(o.en)}
+                  style={{
+                    display: "flex", alignItems: "flex-start", gap: 11, padding: "11px 13px", borderRadius: 9,
+                    background: checked ? COLORS.tealDim : COLORS.panel2,
+                    border: `1px solid ${checked ? COLORS.teal : COLORS.border}`,
+                    cursor: "pointer", userSelect: "none",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(o.en)}
+                    style={{ marginTop: 3, width: 18, height: 18, accentColor: COLORS.teal, flexShrink: 0, cursor: "pointer" }}
+                  />
+                  <span style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.5 }}>
+                    {o.en}
+                    <br />
+                    <span style={{ fontSize: 11, color: COLORS.faint }}>{o.ta}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          {subFaults.length > 0 && (
+            <div style={{ fontSize: 11, color: COLORS.faint, marginTop: 8 }}>
+              {subFaults.length} sub-section{subFaults.length === 1 ? "" : "s"} selected
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1141,9 +1593,14 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
 /*  NEW JOB FORM (Front Desk)                                              */
 /* ---------------------------------------------------------------------- */
 function NewJobForm({ onCreate }) {
-  const [f, setF] = useState({ customer: "", phone: "", brand: "", model: "", issue: "", accessories: "", estimate: "" });
+  const blank = { customer: "", phone: "", brand: "", model: "", issue: "", accessories: "", estimate: "", fault: DEFAULT_FAULTS[0] };
+  const [f, setF] = useState(blank);
+  const [subFaults, setSubFaults] = useState([]);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const setFault = (val) => setF((prev) => ({ ...prev, fault: val }));
   const valid = f.customer.trim() && f.phone.trim().length >= 10 && f.brand.trim() && f.model.trim() && f.issue.trim();
+
+  const reset = () => { setF(blank); setSubFaults([]); };
 
   return (
     <Panel style={{ padding: 22, maxWidth: 640 }}>
@@ -1162,19 +1619,44 @@ function NewJobForm({ onCreate }) {
       <div style={{ marginTop: 14 }}>
         <Field label="Reported Issue"><TextArea value={f.issue} onChange={set("issue")} placeholder="Describe the fault as reported by customer…" /></Field>
       </div>
+      <div style={{ marginTop: 16 }}>
+        <FaultSelector fault={f.fault} setFault={setFault} subFaults={subFaults} setSubFaults={setSubFaults} />
+      </div>
       <div style={{ marginTop: 18, display: "flex", gap: 10, flexWrap: "wrap" }}>
         <Btn
           disabled={!valid}
-          onClick={() => { onCreate({ ...f, estimate: Number(f.estimate) || 0 }); setF({ customer: "", phone: "", brand: "", model: "", issue: "", accessories: "", estimate: "" }); }}
+          onClick={() => { onCreate({ ...f, estimate: Number(f.estimate) || 0, subFaults }); reset(); }}
         >
           <Plus size={14} /> Create Job Card &amp; Send SMS
         </Btn>
-        <Btn variant="outline" onClick={() => setF({ customer: "", phone: "", brand: "", model: "", issue: "", accessories: "", estimate: "" })}>Clear</Btn>
+        <Btn variant="outline" onClick={reset}>Clear</Btn>
       </div>
       <div style={{ marginTop: 12, fontSize: 11.5, color: COLORS.faint }}>
-        Creating a job card automatically sends an SMS confirmation to the customer with their Job ID.
+        Creating a job card automatically sends an SMS confirmation to the customer with their Job ID, and starts
+        the automated 2-hour reminder cycle (based on the default fault selected above) until the job is marked Completed.
       </div>
     </Panel>
+  );
+}
+
+/* Small chip row showing the main fault category + each checked
+   sub-section — used anywhere a job is listed so status tracking shows
+   both at a glance. */
+function FaultTags({ job }) {
+  if (!job.fault && (!job.subFaults || job.subFaults.length === 0)) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 6 }}>
+      {job.fault && (
+        <span style={{ fontSize: 10.5, fontFamily: FONT_MONO, background: COLORS.amberDim, color: COLORS.amber, padding: "2px 8px", borderRadius: 999, fontWeight: 600 }}>
+          {job.fault}
+        </span>
+      )}
+      {(job.subFaults || []).map((sf) => (
+        <span key={sf} style={{ fontSize: 10.5, background: COLORS.panel2, color: COLORS.teal, padding: "2px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}` }}>
+          {sf}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -1221,6 +1703,7 @@ function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, o
                   </div>
                   <div style={{ fontSize: 13.5, fontWeight: 600 }}>{j.customer} <span style={{ color: COLORS.faint, fontWeight: 400 }}>· {j.phone}</span></div>
                   <div style={{ fontSize: 12.5, color: COLORS.muted, marginTop: 2 }}>{j.brand} {j.model} — {j.issue}</div>
+                  <FaultTags job={j} />
                   <div style={{ fontSize: 11, color: COLORS.faint, marginTop: 4 }}>
                     Intake {fmtDateTime(j.intake)} · {timeAgo(j.intake, tick)} · Tech: {technicians.find((t) => t.id === j.assignedTech)?.name || "Unassigned"}
                   </div>
@@ -1265,6 +1748,12 @@ function JobDetail({ job, technicians }) {
         <div><span style={{ color: COLORS.faint }}>Device:</span> {job.brand} {job.model}</div>
         <div><span style={{ color: COLORS.faint }}>Technician:</span> {technicians.find((t) => t.id === job.assignedTech)?.name || "Unassigned"}</div>
         <div style={{ gridColumn: "1 / -1" }}><span style={{ color: COLORS.faint }}>Issue:</span> {job.issue}</div>
+        {job.fault && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <span style={{ color: COLORS.faint }}>Section-wise Fault:</span>
+            <FaultTags job={job} />
+          </div>
+        )}
         {job.partsUsed.length > 0 && (
           <div style={{ gridColumn: "1 / -1" }}>
             <span style={{ color: COLORS.faint }}>Parts used:</span> {job.partsUsed.map((p) => `${p.partId} x${p.qty}`).join(", ")}
@@ -1314,6 +1803,7 @@ function MyJobs({ jobs, parts, tech, onUpdate, onPrintLabel, tick }) {
                   </div>
                   <div style={{ fontSize: 13.5, fontWeight: 600 }}>{j.customer} <span style={{ color: COLORS.faint, fontWeight: 400 }}>· {j.phone}</span></div>
                   <div style={{ fontSize: 12.5, color: COLORS.muted, marginTop: 2 }}>{j.brand} {j.model} — {j.issue}</div>
+                  <FaultTags job={j} />
                   <div style={{ fontSize: 11, color: COLORS.faint, marginTop: 4 }}>Intake {timeAgo(j.intake, tick)}</div>
                 </div>
                 <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
@@ -1354,6 +1844,8 @@ function MyJobs({ jobs, parts, tech, onUpdate, onPrintLabel, tick }) {
 function UpdateJobForm({ job, parts, onSave }) {
   const [status, setStatus] = useState(job.status);
   const [note, setNote] = useState("");
+  const [fault, setFault] = useState(job.fault || DEFAULT_FAULTS[0]);
+  const [subFaults, setSubFaults] = useState(job.subFaults || []);
   const [partRows, setPartRows] = useState([{ partId: "", qty: 1 }]);
 
   const addRow = () => setPartRows((r) => [...r, { partId: "", qty: 1 }]);
@@ -1374,6 +1866,8 @@ function UpdateJobForm({ job, parts, onSave }) {
         <TextArea value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Diagnosed T-Con board fault, replacing now…" />
       </Field>
       <div style={{ height: 14 }} />
+      <FaultSelector fault={fault} setFault={setFault} subFaults={subFaults} setSubFaults={setSubFaults} />
+      <div style={{ height: 14 }} />
       <div style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 700, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 8 }}>Spare Parts Used</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {partRows.map((row, i) => (
@@ -1390,12 +1884,12 @@ function UpdateJobForm({ job, parts, onSave }) {
       <Btn variant="ghost" size="sm" onClick={addRow} style={{ marginTop: 8 }}><Plus size={13} /> Add part</Btn>
 
       <div style={{ marginTop: 18, display: "flex", gap: 10 }}>
-        <Btn onClick={() => onSave({ status, note: note || `Status updated to ${status}.`, partsUsedDelta: validRows })}>
+        <Btn onClick={() => onSave({ status, note: note || `Status updated to ${status}.`, partsUsedDelta: validRows, fault, subFaults })}>
           <CheckCircle2 size={14} /> Save &amp; Notify Customer
         </Btn>
       </div>
       <div style={{ marginTop: 10, fontSize: 11.5, color: COLORS.faint }}>
-        Saving sends an SMS update to the customer and deducts used parts from inventory.
+        Saving sends an SMS update to the customer, deducts used parts from inventory, and records the section-wise fault checklist for the next 2-hour reminder.
       </div>
     </div>
   );

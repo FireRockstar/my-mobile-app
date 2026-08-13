@@ -4,7 +4,7 @@ import {
   MessageSquare, Plus, Printer, Search, X, Bell, RefreshCw, CheckCircle2,
   Clock, AlertTriangle, LogOut, Phone, ChevronRight, IndianRupee,
   Banknote, CreditCard, Smartphone, Trash2, UserCircle2, ArrowLeft,
-  PackagePlus, PackageMinus, TrendingUp, CircleDot
+  PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- */
@@ -347,10 +347,11 @@ function StatCard({ icon: Icon, label, value, sub, accent }) {
 /* ---------------------------------------------------------------------- */
 /*  ROOT APP                                                               */
 /* ---------------------------------------------------------------------- */
-export default function TVRepairCRM() {
+export default function AitechLabCRM() {
   const [role, setRole] = useState(null); // 'admin' | 'frontdesk' | 'technician'
   const [activeTechId, setActiveTechId] = useState(null);
   const [tab, setTab] = useState("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const [technicians, setTechnicians] = useState(SEED_TECHS);
   const [parts, setParts] = useState(SEED_PARTS);
@@ -567,7 +568,7 @@ export default function TVRepairCRM() {
   const roleSub = { admin: "Full access", frontdesk: "Intake desk", technician: techMap[activeTechId]?.specialty || "" };
 
   return (
-    <div style={{
+    <div className="app-shell" style={{
       fontFamily: FONT_SANS, background: COLORS.bg, color: COLORS.text, minHeight: 620,
       display: "flex", borderRadius: 14, overflow: "hidden", border: `1px solid ${COLORS.border}`,
     }}>
@@ -577,28 +578,67 @@ export default function TVRepairCRM() {
         ::placeholder { color: ${COLORS.faint}; }
         .navitem:hover { background: ${COLORS.panel2} !important; }
         .rowhover:hover { background: ${COLORS.panel2} !important; }
+        .hamburger-btn { display: none; }
+        .sidebar-overlay { display: none; }
+        .data-row { flex-wrap: wrap; }
+
+        @media (max-width: 860px) {
+          .app-shell { flex-direction: column; min-height: 100vh !important; border-radius: 0 !important; }
+          .sidebar {
+            position: fixed; top: 0; left: 0; height: 100%; width: 250px !important;
+            transform: translateX(-100%); transition: transform .22s ease; z-index: 90;
+          }
+          .sidebar.open { transform: translateX(0); box-shadow: 0 0 40px rgba(0,0,0,0.5); }
+          .sidebar-overlay.open {
+            display: block; position: fixed; inset: 0; background: rgba(6,8,11,0.6); z-index: 80;
+          }
+          .hamburger-btn { display: inline-flex !important; }
+          .main-scroll { padding: 14px !important; }
+          .dashboard-2col { grid-template-columns: 1fr !important; }
+          .form-grid-2col { grid-template-columns: 1fr !important; }
+          .form-grid-4col { grid-template-columns: 1fr 1fr !important; }
+          .stat-row { gap: 10px !important; }
+          .stat-row > div { min-width: 46% !important; }
+          .table-scroll { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+          .table-scroll > div { min-width: 560px; }
+          .print-chrome-inner { width: 100% !important; max-width: 380px; }
+        }
+        @media (max-width: 480px) {
+          .stat-row > div { min-width: 100% !important; }
+          .form-grid-4col { grid-template-columns: 1fr !important; }
+        }
       `}</style>
 
       {/* ---------------- SIDEBAR ---------------- */}
-      <div style={{ width: 220, background: COLORS.panel, borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", flexShrink: 0 }}>
-        <div style={{ padding: "18px 18px 14px", borderBottom: `1px solid ${COLORS.border}` }}>
+      <div
+        className={`sidebar${mobileNavOpen ? " open" : ""}`}
+        style={{ width: 220, background: COLORS.panel, borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", flexShrink: 0 }}
+      >
+        <div style={{ padding: "18px 18px 14px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
             <div style={{ width: 32, height: 32, borderRadius: 8, background: COLORS.amber, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Tv size={17} color="#1A1300" />
             </div>
             <div>
-              <div style={{ fontWeight: 800, fontSize: 14.5, letterSpacing: 0.2 }}>BenchDesk</div>
-              <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: FONT_MONO, letterSpacing: 0.5 }}>TV REPAIR CRM</div>
+              <div style={{ fontWeight: 800, fontSize: 14.5, letterSpacing: 0.2 }}>AitechLab CRM</div>
+              <div style={{ fontSize: 10, color: COLORS.faint, fontFamily: FONT_MONO, letterSpacing: 0.5 }}>TV REPAIR SERVICE</div>
             </div>
           </div>
+          <button
+            className="hamburger-btn"
+            onClick={() => setMobileNavOpen(false)}
+            style={{ background: "transparent", border: "none", color: COLORS.muted, cursor: "pointer", padding: 4 }}
+          >
+            <X size={18} />
+          </button>
         </div>
 
-        <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
+        <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 2, flex: 1, overflowY: "auto" }}>
           {NAV[role].map((n) => (
             <button
               key={n.id}
               className="navitem"
-              onClick={() => setTab(n.id)}
+              onClick={() => { setTab(n.id); setMobileNavOpen(false); }}
               style={{
                 display: "flex", alignItems: "center", gap: 10, padding: "9px 11px", borderRadius: 8,
                 background: tab === n.id ? COLORS.panel2 : "transparent",
@@ -632,6 +672,8 @@ export default function TVRepairCRM() {
         </div>
       </div>
 
+      <div className={`sidebar-overlay${mobileNavOpen ? " open" : ""}`} onClick={() => setMobileNavOpen(false)} />
+
       {/* ---------------- MAIN ---------------- */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
         <TopBar
@@ -646,9 +688,10 @@ export default function TVRepairCRM() {
             setLastRefresh(Date.now());
             pushToast(`Dashboard refreshed manually. ${overdueJobs.length} order(s) need attention.`, "alert");
           }}
+          onOpenNav={() => setMobileNavOpen(true)}
         />
 
-        <div style={{ flex: 1, overflowY: "auto", padding: 22 }}>
+        <div className="main-scroll" style={{ flex: 1, overflowY: "auto", padding: 22 }}>
           {tab === "dashboard" && role === "admin" && (
             <Dashboard
               jobs={jobs} invoices={invoices} technicians={technicians} parts={parts}
@@ -743,8 +786,8 @@ function RoleSelect({ technicians, onSelect }) {
           <div style={{ width: 54, height: 54, borderRadius: 14, background: COLORS.amber, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
             <Tv size={28} color="#1A1300" />
           </div>
-          <div style={{ fontWeight: 800, fontSize: 21 }}>BenchDesk</div>
-          <div style={{ fontSize: 12, color: COLORS.faint, fontFamily: FONT_MONO, letterSpacing: 1, marginTop: 2 }}>LED TV REPAIR SHOP CRM</div>
+          <div style={{ fontWeight: 800, fontSize: 21 }}>AitechLab CRM</div>
+          <div style={{ fontSize: 12, color: COLORS.faint, fontFamily: FONT_MONO, letterSpacing: 1, marginTop: 2 }}>LED TV REPAIR SHOP</div>
         </div>
 
         {!pickingTech ? (
@@ -814,17 +857,26 @@ function RoleSelect({ technicians, onSelect }) {
 /* ---------------------------------------------------------------------- */
 /*  TOP BAR                                                                 */
 /* ---------------------------------------------------------------------- */
-function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAlerts, overdueJobs, onManualRefresh }) {
+function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAlerts, overdueJobs, onManualRefresh, onOpenNav }) {
   const titles = { admin: "Dashboard", frontdesk: "Front Desk", technician: "Technician Bench" };
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: "14px 22px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.panel,
+      padding: "14px 22px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.panel, gap: 10, flexWrap: "wrap",
     }}>
-      <div>
-        <div style={{ fontSize: 15, fontWeight: 800 }}>{titles[role]}</div>
-        <div style={{ fontSize: 11, color: COLORS.faint, fontFamily: FONT_MONO }}>
-          Auto-refresh every 30s · last sync {timeAgo(lastRefresh, tick)}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <button
+          className="hamburger-btn"
+          onClick={onOpenNav}
+          style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 8, color: COLORS.text, cursor: "pointer", padding: 7, alignItems: "center", justifyContent: "center" }}
+        >
+          <Menu size={17} />
+        </button>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>{titles[role]}</div>
+          <div style={{ fontSize: 11, color: COLORS.faint, fontFamily: FONT_MONO }}>
+            Auto-refresh every 30s · last sync {timeAgo(lastRefresh, tick)}
+          </div>
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
@@ -851,7 +903,7 @@ function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAler
         </button>
         {showAlerts && (
           <div style={{
-            position: "absolute", top: 42, right: 0, width: 300, background: COLORS.panel2,
+            position: "absolute", top: 42, right: 0, width: "min(300px, 88vw)", background: COLORS.panel2,
             border: `1px solid ${COLORS.borderLight}`, borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.4)",
             zIndex: 40, padding: 12,
           }}>
@@ -885,7 +937,7 @@ function Toast({ toast }) {
   const Icon = toast.kind === "alert" ? AlertTriangle : toast.kind === "ok" ? CheckCircle2 : MessageSquare;
   return (
     <div style={{
-      position: "fixed", bottom: 20, right: 20, maxWidth: 360, background: COLORS.panel2,
+      position: "fixed", bottom: 20, right: 20, left: 20, maxWidth: 360, marginLeft: "auto", background: COLORS.panel2,
       border: `1px solid ${kindColor}55`, borderRadius: 10, padding: "12px 14px", display: "flex", gap: 10,
       boxShadow: "0 10px 30px rgba(0,0,0,0.45)", zIndex: 200, alignItems: "flex-start",
     }}>
@@ -909,7 +961,7 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+      <div className="stat-row" style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
         <StatCard icon={ClipboardList} label="Pending Orders" value={pendingOrders.length} sub="Awaiting or in repair" accent={COLORS.amber} />
         <StatCard icon={IndianRupee} label="Revenue Today" value={fmtMoney(revenueToday)} sub="Paid invoices, today" accent={COLORS.teal} />
         <StatCard icon={AlertTriangle} label="Outstanding Dues" value={fmtMoney(outstandingDues)} sub="Unpaid invoices" accent={COLORS.red} />
@@ -936,7 +988,7 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
         </Panel>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16 }}>
+      <div className="dashboard-2col" style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16 }}>
         <Panel style={{ padding: 18 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
             <div style={{ fontWeight: 700, fontSize: 13.5 }}>Technician Workload</div>
@@ -985,7 +1037,7 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
         <div style={{ display: "flex", flexDirection: "column" }}>
           {pendingOrders.length === 0 && <div style={{ fontSize: 12.5, color: COLORS.faint }}>No pending orders — bench is clear.</div>}
           {sortByUrgency(pendingOrders).map((j) => (
-            <div key={j.id} className="rowhover" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: `1px solid ${COLORS.border}` }}>
+            <div key={j.id} className="rowhover data-row" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: `1px solid ${COLORS.border}` }}>
               <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLORS.text, width: 78 }}>{j.id}</span>
               <span style={{ fontSize: 12.5, flex: 1 }}>{j.customer} — {j.brand} {j.model}</span>
               <span style={{ fontSize: 11.5, color: COLORS.faint, width: 130 }}>{j.assignedTech ? techMapName(technicians, j.assignedTech) : "Unassigned"}</span>
@@ -1015,7 +1067,7 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+      <div className="stat-row" style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
         <StatCard icon={ClipboardList} label="Pending Orders" value={pending.length} sub="Open across the bench" accent={COLORS.amber} />
         <StatCard icon={Clock} label="Pending Today" value={pendingToday.length} sub="Intake received today" accent={COLORS.blue} />
         <StatCard icon={Users} label="Unassigned" value={unassigned.length} sub="Waiting on a technician" accent={COLORS.red} />
@@ -1070,7 +1122,7 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
         <div style={{ display: "flex", flexDirection: "column" }}>
           {completed.length === 0 && <div style={{ fontSize: 12.5, color: COLORS.faint }}>No completed orders yet.</div>}
           {completed.map((j) => (
-            <div key={j.id} className="rowhover" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: `1px solid ${COLORS.border}` }}>
+            <div key={j.id} className="rowhover data-row" style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", borderBottom: `1px solid ${COLORS.border}` }}>
               <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: COLORS.text, width: 78 }}>{j.id}</span>
               <span style={{ fontSize: 12.5, flex: 1 }}>{j.customer} — {j.brand} {j.model}</span>
               <span style={{ fontSize: 11.5, color: COLORS.faint, width: 130 }}>{j.assignedTech ? techMapName(technicians, j.assignedTech) : "Unassigned"}</span>
@@ -1099,7 +1151,7 @@ function NewJobForm({ onCreate }) {
         <Plus size={17} color={COLORS.amber} />
         <div style={{ fontWeight: 800, fontSize: 15.5 }}>New Job Card — Intake</div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+      <div className="form-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
         <Field label="Customer Name"><Input value={f.customer} onChange={set("customer")} placeholder="e.g. Anitha Raman" /></Field>
         <Field label="Phone Number"><Input value={f.phone} onChange={set("phone")} placeholder="10-digit mobile" /></Field>
         <Field label="TV Brand"><Input value={f.brand} onChange={set("brand")} placeholder="e.g. Samsung, LG, Sony" /></Field>
@@ -1110,7 +1162,7 @@ function NewJobForm({ onCreate }) {
       <div style={{ marginTop: 14 }}>
         <Field label="Reported Issue"><TextArea value={f.issue} onChange={set("issue")} placeholder="Describe the fault as reported by customer…" /></Field>
       </div>
-      <div style={{ marginTop: 18, display: "flex", gap: 10 }}>
+      <div style={{ marginTop: 18, display: "flex", gap: 10, flexWrap: "wrap" }}>
         <Btn
           disabled={!valid}
           onClick={() => { onCreate({ ...f, estimate: Number(f.estimate) || 0 }); setF({ customer: "", phone: "", brand: "", model: "", issue: "", accessories: "", estimate: "" }); }}
@@ -1162,7 +1214,7 @@ function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, o
             <Panel key={j.id} style={{ padding: 15, borderColor: overdue ? `${COLORS.red}66` : COLORS.border }}>
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ flex: 1, minWidth: 220 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5, flexWrap: "wrap" }}>
                     <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13.5 }}>{j.id}</span>
                     <Badge status={j.status} />
                     {overdue && <span style={{ fontSize: 10.5, color: COLORS.red, fontFamily: FONT_MONO, display: "flex", alignItems: "center", gap: 3 }}><AlertTriangle size={11} /> overdue</span>}
@@ -1207,7 +1259,7 @@ function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, o
 function JobDetail({ job, technicians }) {
   return (
     <div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16, fontSize: 12.5 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16, fontSize: 12.5 }} className="form-grid-2col">
         <div><span style={{ color: COLORS.faint }}>Customer:</span> {job.customer}</div>
         <div><span style={{ color: COLORS.faint }}>Phone:</span> {job.phone}</div>
         <div><span style={{ color: COLORS.faint }}>Device:</span> {job.brand} {job.model}</div>
@@ -1264,7 +1316,7 @@ function MyJobs({ jobs, parts, tech, onUpdate, onPrintLabel, tick }) {
                   <div style={{ fontSize: 12.5, color: COLORS.muted, marginTop: 2 }}>{j.brand} {j.model} — {j.issue}</div>
                   <div style={{ fontSize: 11, color: COLORS.faint, marginTop: 4 }}>Intake {timeAgo(j.intake, tick)}</div>
                 </div>
-                <div style={{ display: "flex", gap: 7 }}>
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
                   <Btn size="sm" variant="outline" onClick={() => onPrintLabel(j)}><Printer size={13} /> Label</Btn>
                   <Btn size="sm" onClick={() => setEditing(j)}><Wrench size={13} /> Update</Btn>
                 </div>
@@ -1279,7 +1331,7 @@ function MyJobs({ jobs, parts, tech, onUpdate, onPrintLabel, tick }) {
           <div style={{ fontSize: 12.5, color: COLORS.faint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>Delivered</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {done.map((j) => (
-              <div key={j.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "8px 4px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.muted }}>
+              <div key={j.id} className="data-row" style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "8px 4px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.muted }}>
                 <span style={{ fontFamily: FONT_MONO }}>{j.id}</span><span>{j.customer}</span><Badge status={j.status} />
               </div>
             ))}
@@ -1325,8 +1377,8 @@ function UpdateJobForm({ job, parts, onSave }) {
       <div style={{ fontSize: 11.5, color: COLORS.muted, fontWeight: 700, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 8 }}>Spare Parts Used</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {partRows.map((row, i) => (
-          <div key={i} style={{ display: "flex", gap: 8 }}>
-            <Select value={row.partId} onChange={(e) => updateRow(i, "partId", e.target.value)} style={{ flex: 1 }}>
+          <div key={i} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Select value={row.partId} onChange={(e) => updateRow(i, "partId", e.target.value)} style={{ flex: 1, minWidth: 160 }}>
               <option value="">Select part…</option>
               {parts.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.qty} in stock)</option>)}
             </Select>
@@ -1359,7 +1411,7 @@ function Billing({ jobs, invoices, parts, role, onCreateInvoice, onMarkPaid, onP
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 14, marginBottom: 20, flexWrap: "wrap" }}>
+      <div className="stat-row" style={{ display: "flex", gap: 14, marginBottom: 20, flexWrap: "wrap" }}>
         {isAdmin && (
           <StatCard icon={IndianRupee} label="Revenue Today" value={fmtMoney(revenueToday)} accent={COLORS.teal} />
         )}
@@ -1446,7 +1498,7 @@ function InvoiceForm({ job, parts, onSubmit }) {
         <Field label="Service & Labor Charge (₹)"><Input type="number" value={labor} onChange={(e) => setLabor(e.target.value)} /></Field>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+      <div className="form-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
         <Field label="Payment Method">
           <Select value={method} onChange={(e) => setMethod(e.target.value)}>
             <option>Cash</option><option>GPay</option><option>Credit Card</option>
@@ -1490,14 +1542,14 @@ function Inventory({ parts, setParts }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
         <div style={{ fontWeight: 700, fontSize: 14.5 }}>Spare Parts Inventory</div>
         <Btn size="sm" onClick={() => setAdding(true)}><Plus size={13} /> Add Part</Btn>
       </div>
 
       {adding && (
         <Panel style={{ padding: 16, marginBottom: 16 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 10 }}>
+          <div className="form-grid-4col" style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 10 }}>
             <Field label="Part Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
             <Field label="Qty"><Input type="number" value={f.qty} onChange={(e) => setF({ ...f, qty: e.target.value })} /></Field>
             <Field label="Unit Cost (₹)"><Input type="number" value={f.cost} onChange={(e) => setF({ ...f, cost: e.target.value })} /></Field>
@@ -1510,26 +1562,28 @@ function Inventory({ parts, setParts }) {
         </Panel>
       )}
 
-      <Panel style={{ overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 0.8fr 0.8fr 1fr 1fr", padding: "10px 15px", background: COLORS.panel2, fontSize: 11, color: COLORS.faint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>
-          <span>Part</span><span>Stock</span><span>Unit Cost</span><span>Status</span><span>Adjust</span>
-        </div>
-        {parts.map((p) => (
-          <div key={p.id} className="rowhover" style={{ display: "grid", gridTemplateColumns: "2fr 0.8fr 0.8fr 1fr 1fr", padding: "11px 15px", borderTop: `1px solid ${COLORS.border}`, alignItems: "center", fontSize: 13 }}>
-            <span>{p.name}</span>
-            <span style={{ fontFamily: FONT_MONO }}>{p.qty}</span>
-            <span style={{ fontFamily: FONT_MONO }}>{fmtMoney(p.cost)}</span>
-            <span>
-              {p.qty <= p.low
-                ? <span style={{ color: COLORS.red, fontSize: 11.5, fontWeight: 700, background: COLORS.redDim, padding: "2px 8px", borderRadius: 999 }}>Low stock</span>
-                : <span style={{ color: COLORS.teal, fontSize: 11.5, fontWeight: 700, background: COLORS.tealDim, padding: "2px 8px", borderRadius: 999 }}>In stock</span>}
-            </span>
-            <span style={{ display: "flex", gap: 6 }}>
-              <button onClick={() => adjustQty(p.id, -1)} style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 6, cursor: "pointer", padding: 4 }}><PackageMinus size={13} color={COLORS.muted} /></button>
-              <button onClick={() => adjustQty(p.id, 1)} style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 6, cursor: "pointer", padding: 4 }}><PackagePlus size={13} color={COLORS.muted} /></button>
-            </span>
+      <Panel className="table-scroll" style={{ overflow: "hidden" }}>
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 0.8fr 0.8fr 1fr 1fr", padding: "10px 15px", background: COLORS.panel2, fontSize: 11, color: COLORS.faint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>
+            <span>Part</span><span>Stock</span><span>Unit Cost</span><span>Status</span><span>Adjust</span>
           </div>
-        ))}
+          {parts.map((p) => (
+            <div key={p.id} className="rowhover" style={{ display: "grid", gridTemplateColumns: "2fr 0.8fr 0.8fr 1fr 1fr", padding: "11px 15px", borderTop: `1px solid ${COLORS.border}`, alignItems: "center", fontSize: 13 }}>
+              <span>{p.name}</span>
+              <span style={{ fontFamily: FONT_MONO }}>{p.qty}</span>
+              <span style={{ fontFamily: FONT_MONO }}>{fmtMoney(p.cost)}</span>
+              <span>
+                {p.qty <= p.low
+                  ? <span style={{ color: COLORS.red, fontSize: 11.5, fontWeight: 700, background: COLORS.redDim, padding: "2px 8px", borderRadius: 999 }}>Low stock</span>
+                  : <span style={{ color: COLORS.teal, fontSize: 11.5, fontWeight: 700, background: COLORS.tealDim, padding: "2px 8px", borderRadius: 999 }}>In stock</span>}
+              </span>
+              <span style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => adjustQty(p.id, -1)} style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 6, cursor: "pointer", padding: 4 }}><PackageMinus size={13} color={COLORS.muted} /></button>
+                <button onClick={() => adjustQty(p.id, 1)} style={{ background: COLORS.panel2, border: `1px solid ${COLORS.border}`, borderRadius: 6, cursor: "pointer", padding: 4 }}><PackagePlus size={13} color={COLORS.muted} /></button>
+              </span>
+            </div>
+          ))}
+        </div>
       </Panel>
     </div>
   );
@@ -1551,14 +1605,14 @@ function TechniciansView({ technicians, setTechnicians, jobs }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
         <div style={{ fontWeight: 700, fontSize: 14.5 }}>Technicians</div>
         <Btn size="sm" onClick={() => setAdding(true)}><Plus size={13} /> Add Technician</Btn>
       </div>
 
       {adding && (
         <Panel style={{ padding: 16, marginBottom: 16 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div className="form-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
             <Field label="Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
             <Field label="Phone"><Input value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} /></Field>
             <Field label="Specialty"><Input value={f.specialty} onChange={(e) => setF({ ...f, specialty: e.target.value })} /></Field>
@@ -1629,7 +1683,7 @@ function SmsLogView({ log }) {
 function PrintChrome({ onBack, children }) {
   return (
     <div style={{ background: "#fff", color: "#111", minHeight: 620, borderRadius: 14, padding: 24, fontFamily: FONT_SANS }}>
-      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", marginBottom: 18 }}>
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
         <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "#EEE", border: "none", borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
           <ArrowLeft size={14} /> Back to CRM
         </button>
@@ -1646,11 +1700,11 @@ function PrintChrome({ onBack, children }) {
 function PrintLabel({ job, onBack }) {
   return (
     <PrintChrome onBack={onBack}>
-      <div style={{
-        width: 380, border: "2px solid #111", borderRadius: 10, padding: 18, fontFamily: FONT_MONO,
+      <div className="print-chrome-inner" style={{
+        width: 380, maxWidth: "100%", border: "2px solid #111", borderRadius: 10, padding: 18, fontFamily: FONT_MONO, boxSizing: "border-box",
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "2px solid #111", paddingBottom: 8, marginBottom: 10 }}>
-          <div style={{ fontWeight: 800, fontSize: 14 }}>BENCHDESK TV REPAIR</div>
+          <div style={{ fontWeight: 800, fontSize: 14 }}>AITECHLAB CRM · TV REPAIR</div>
           <div style={{ fontSize: 11 }}>JOB LABEL</div>
         </div>
         <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: 1, marginBottom: 10 }}>{job.id}</div>
@@ -1673,10 +1727,10 @@ function PrintLabel({ job, onBack }) {
 function PrintInvoice({ invoice, job, onBack }) {
   return (
     <PrintChrome onBack={onBack}>
-      <div style={{ maxWidth: 620, margin: "0 auto", border: "1px solid #ccc", borderRadius: 10, padding: 28 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "2px solid #111", paddingBottom: 14, marginBottom: 18 }}>
+      <div style={{ maxWidth: 620, width: "100%", margin: "0 auto", border: "1px solid #ccc", borderRadius: 10, padding: 28, boxSizing: "border-box" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "2px solid #111", paddingBottom: 14, marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 19 }}>BenchDesk TV Repair</div>
+            <div style={{ fontWeight: 800, fontSize: 19 }}>AitechLab CRM</div>
             <div style={{ fontSize: 11.5, color: "#555" }}>LED / LCD Television Sales &amp; Service</div>
             <div style={{ fontSize: 11.5, color: "#555" }}>Coimbatore, Tamil Nadu · +91 98765 00000</div>
           </div>
@@ -1686,7 +1740,7 @@ function PrintInvoice({ invoice, job, onBack }) {
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 18, fontSize: 12.5 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 18, fontSize: 12.5 }} className="form-grid-2col">
           <div><strong>Billed to:</strong> {invoice.customer}</div>
           <div><strong>Job Card:</strong> {invoice.jobId}</div>
           {job && <div><strong>Device:</strong> {job.brand} {job.model}</div>}
@@ -1711,7 +1765,7 @@ function PrintInvoice({ invoice, job, onBack }) {
         </table>
 
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <div style={{ width: 220 }}>
+          <div style={{ width: 220, maxWidth: "100%" }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, borderTop: "2px solid #111", paddingTop: 8 }}>
               <span>Total</span><span style={{ fontFamily: FONT_MONO }}>{fmtMoney(invoice.total)}</span>
             </div>
@@ -1728,7 +1782,7 @@ function PrintInvoice({ invoice, job, onBack }) {
         </div>
 
         <div style={{ marginTop: 26, fontSize: 10.5, color: "#888", textAlign: "center", borderTop: "1px dashed #ccc", paddingTop: 10 }}>
-          Thank you for choosing BenchDesk TV Repair. This is a system-generated invoice.
+          Thank you for choosing AitechLab CRM. This is a system-generated invoice.
         </div>
       </div>
     </PrintChrome>

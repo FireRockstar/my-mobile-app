@@ -4,7 +4,7 @@ import {
   MessageSquare, Plus, Printer, Search, X, Bell, RefreshCw, CheckCircle2,
   Clock, AlertTriangle, LogOut, Phone, ChevronRight, IndianRupee,
   Banknote, CreditCard, Smartphone, Trash2, UserCircle2, ArrowLeft,
-  PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin
+  PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin, Eye
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- */
@@ -511,23 +511,31 @@ let invCounter = 5002;
 const nextInvId = () => `INV-${invCounter++}`;
 
 /* ---------------------------------------------------------------------- */
-/*  CID / JID GENERATOR — daily-sequenced IDs, e.g. CID-260816-001,        */
-/*  JID-260816-001. Mirrors the next_daily_id() Postgres function from     */
+/*  CID / JID GENERATOR — daily-sequenced IDs, e.g. CID-20260816-001,      */
+/*  JID-20260816-8000. Mirrors the next_daily_id() Postgres function from  */
 /*  the Android Call Launcher architecture doc, so the same ID scheme      */
 /*  works whether a record originates from the phone app or this web app. */
+/*  Job numbers start at 8000 each day; CID numbers start at 001.          */
 /* ---------------------------------------------------------------------- */
 const dailyIdCounters = {};
-function todayYYMMDD() {
+const DAILY_ID_CONFIG = {
+  JID: { start: 8000, pad: 0 },
+  CID: { start: 1, pad: 3 },
+};
+function todayYYYYMMDD() {
   const d = new Date();
-  const yy = String(d.getFullYear()).slice(-2);
+  const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
-  return `${yy}${mm}${dd}`;
+  return `${yyyy}${mm}${dd}`;
 }
 function nextDailyId(prefix) {
-  const key = `${prefix}-${todayYYMMDD()}`;
-  dailyIdCounters[key] = (dailyIdCounters[key] || 0) + 1;
-  return `${key}-${String(dailyIdCounters[key]).padStart(3, "0")}`;
+  const cfg = DAILY_ID_CONFIG[prefix] || { start: 1, pad: 3 };
+  const key = `${prefix}-${todayYYYYMMDD()}`;
+  if (dailyIdCounters[key] === undefined) dailyIdCounters[key] = cfg.start - 1;
+  dailyIdCounters[key] += 1;
+  const numStr = cfg.pad ? String(dailyIdCounters[key]).padStart(cfg.pad, "0") : String(dailyIdCounters[key]);
+  return `${key}-${numStr}`;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -715,6 +723,8 @@ export default function AitechLabCRM() {
   const [newJobPreset, setNewJobPreset] = useState(null); // CID being converted into a job via "+ Create Job"
   const [addingCustomer, setAddingCustomer] = useState(false); // global "+ Add New Customer" modal, reachable from every dashboard
   const [popupReminder, setPopupReminder] = useState(null); // reminder shown as an auto-opened modal
+  const [confirmedRepairPopup, setConfirmedRepairPopup] = useState(null); // "customer confirmed" notification for the technician
+  const [declinedRepairPopup, setDeclinedRepairPopup] = useState(null); // "customer declined — return TV" notification for the technician
 
   const toastTimer = useRef(null);
   const prevOverdueCount = useRef(null);
@@ -865,6 +875,23 @@ export default function AitechLabCRM() {
     });
   }, [jobs]);
 
+  /* Technician-side notification: the moment Admin/Front Desk marks a job's
+     customer confirmation as OK, pop it up on that technician's screen —
+     wherever they are in the app — so they know they're clear to proceed.
+     A decline pops the equivalent "pack up and return" notification. */
+  useEffect(() => {
+    if (role !== "indoor_tech" || !activeTechId) return;
+    const newlyConfirmed = jobs.find((j) => j.assignedTech === activeTechId && j.approvalStage === "confirmed");
+    if (newlyConfirmed && (!confirmedRepairPopup || confirmedRepairPopup.id !== newlyConfirmed.id)) {
+      setConfirmedRepairPopup(newlyConfirmed);
+    }
+    const newlyDeclined = jobs.find((j) => j.assignedTech === activeTechId && j.approvalStage === "declined");
+    if (newlyDeclined && (!declinedRepairPopup || declinedRepairPopup.id !== newlyDeclined.id)) {
+      setDeclinedRepairPopup(newlyDeclined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs, role, activeTechId]);
+
   function pushToast(message, kind = "sms") {
     setToast({ message, kind, id: Math.random() });
     clearTimeout(toastTimer.current);
@@ -997,6 +1024,14 @@ export default function AitechLabCRM() {
     [jobs, tick]
   );
 
+  // Repair requests awaiting Admin/Front Desk action: a technician has
+  // submitted a diagnosis ("pending_review"), or an estimate has been set
+  // and the customer's confirmation is still outstanding ("awaiting_customer").
+  const repairAlerts = useMemo(
+    () => jobs.filter((j) => j.approvalStage === "pending_review" || j.approvalStage === "awaiting_customer"),
+    [jobs]
+  );
+
   const revenueToday = useMemo(
     () => invoices.filter((i) => i.paymentStatus === "Paid" && isSameDay(i.paidAt)).reduce((s, i) => s + i.total, 0),
     [invoices, tick]
@@ -1012,7 +1047,7 @@ export default function AitechLabCRM() {
 
   /* ---------------- job actions ---------------- */
   function createJob(data, creator = { role: "frontdesk", label: "Front Desk", techId: null }) {
-    const id = nextDailyId("JID");
+    const id = data.id || nextDailyId("JID");
     const job = {
       id, ...data, intake: Date.now(), status: "Pending",
       assignedTech: creator.techId || null,
@@ -1117,6 +1152,121 @@ export default function AitechLabCRM() {
     }
   }
 
+  /* ---------------------------------------------------------------- */
+  /*  REPAIR APPROVAL WORKFLOW                                          */
+  /*  1. Indoor technician submits a diagnosis/remarks + status from    */
+  /*     "My Jobs" (no pricing, no customer contact info visible).      */
+  /*  2. Admin/Front Desk see it as a "Repair Request" in the bell      */
+  /*     menu, add a repair estimate + service charge, and it moves to  */
+  /*     "awaiting customer" — they contact the customer via            */
+  /*     Call/SMS/WhatsApp (already available) to get approval.        */
+  /*  3a. Customer says yes → Admin/Front Desk mark it confirmed, which */
+  /*      pops a notification on the technician's dashboard so they     */
+  /*      know they're clear to proceed. Once the technician marks the  */
+  /*      repair Completed, a full invoice (parts + repair + service    */
+  /*      charge) is generated automatically.                          */
+  /*  3b. Customer says no → Admin/Front Desk mark it declined, which    */
+  /*      pops a "pack up and return" notification on the technician's  */
+  /*      dashboard, and a service-charge-only invoice is generated      */
+  /*      automatically right away (no repair was done).                */
+  /* ---------------------------------------------------------------- */
+  function submitRepairReport(jobId, status, remarks, by) {
+    const job = jobs.find((j) => j.id === jobId);
+    if (!job) return;
+    const alreadyApproved = job.approvalStage === "confirmed" || job.approvalStage === "acknowledged";
+    const isCompleting = status === "Completed" && alreadyApproved;
+
+    setJobs((js) => js.map((j) => {
+      if (j.id !== jobId) return j;
+      if (isCompleting) {
+        return {
+          ...j, status, repairRemarks: remarks, invoiced: true,
+          updates: [...j.updates, { ts: Date.now(), by, note: `Repair completed: ${remarks}. Invoice generated.`, status }],
+        };
+      }
+      if (alreadyApproved) {
+        return {
+          ...j, status: status || j.status, repairRemarks: remarks,
+          updates: [...j.updates, { ts: Date.now(), by, note: `Repair update: ${remarks}`, status: status || j.status }],
+        };
+      }
+      return {
+        ...j, status: status || j.status, repairRemarks: remarks, approvalStage: "pending_review",
+        updates: [...j.updates, { ts: Date.now(), by, note: `Repair diagnosis submitted: ${remarks}`, status: status || j.status }],
+      };
+    }));
+
+    if (isCompleting) {
+      const partItems = job.partsUsed.map((pu) => ({
+        desc: `${partMap[pu.partId]?.name || pu.partId} x${pu.qty}`,
+        amount: (partMap[pu.partId]?.cost || 0) * pu.qty,
+      }));
+      const items = [
+        ...partItems,
+        { desc: "Repair / Labor Charge", amount: job.estimate || 0 },
+        { desc: "Service Charge", amount: job.serviceCharge || 0 },
+      ];
+      const total = items.reduce((s, i) => s + i.amount, 0);
+      const inv = {
+        id: nextInvId(), jobId: job.id, customer: job.customer, items, total,
+        paymentMethod: "Cash", paymentStatus: "Pending",
+        createdAt: Date.now(), paidAt: null,
+      };
+      setInvoices((iv) => [inv, ...iv]);
+      pushToast(`Repair completed for ${jobId} — invoice ${inv.id} auto-generated (${fmtMoney(total)}).`, "ok");
+    } else if (alreadyApproved) {
+      pushToast(`Progress update submitted for ${jobId}.`, "sms");
+    } else {
+      pushToast(`Repair update submitted for ${jobId} — awaiting Admin/Front Desk review.`, "alert");
+    }
+  }
+
+  function reviewRepairRequest(jobId, estimate, serviceCharge, by) {
+    setJobs((js) => js.map((j) => (j.id === jobId ? {
+      ...j, estimate: Number(estimate) || j.estimate, serviceCharge: Number(serviceCharge) || 0, approvalStage: "awaiting_customer",
+      updates: [...j.updates, {
+        ts: Date.now(), by,
+        note: `Repair estimate ₹${estimate} + service charge ₹${serviceCharge || 0} (total ${fmtMoney((Number(estimate) || 0) + (Number(serviceCharge) || 0))}) sent — awaiting customer confirmation.`,
+        status: j.status,
+      }],
+    } : j)));
+    pushToast(`Estimate sent — contact the customer for approval on ${jobId}.`, "ok");
+  }
+
+  function confirmCustomerApproval(jobId, by) {
+    setJobs((js) => js.map((j) => (j.id === jobId ? {
+      ...j, approvalStage: "confirmed",
+      updates: [...j.updates, { ts: Date.now(), by, note: "Customer confirmed OK to proceed with repair.", status: j.status }],
+    } : j)));
+    pushToast(`Customer confirmation recorded for ${jobId}. Technician notified.`, "ok");
+  }
+
+  function declineCustomerApproval(jobId, by) {
+    const job = jobs.find((j) => j.id === jobId);
+    if (!job) return;
+    setJobs((js) => js.map((j) => (j.id === jobId ? {
+      ...j, approvalStage: "declined", status: "Completed", invoiced: true,
+      updates: [...j.updates, { ts: Date.now(), by, note: "Customer did not approve the repair — pack up TV for return. Service charge invoice generated.", status: "Completed" }],
+    } : j)));
+    const inv = {
+      id: nextInvId(), jobId: job.id, customer: job.customer,
+      items: [{ desc: "Diagnostic / Service Charge", amount: job.serviceCharge || 0 }],
+      total: job.serviceCharge || 0,
+      paymentMethod: "Cash", paymentStatus: "Pending",
+      createdAt: Date.now(), paidAt: null,
+    };
+    setInvoices((iv) => [inv, ...iv]);
+    pushToast(`Customer declined repair on ${jobId} — service charge invoice ${inv.id} generated.`, "alert");
+  }
+
+  function acknowledgeRepairConfirmation(jobId) {
+    setJobs((js) => js.map((j) => (j.id === jobId ? { ...j, approvalStage: "acknowledged" } : j)));
+  }
+
+  function acknowledgeRepairDecline(jobId) {
+    setJobs((js) => js.map((j) => (j.id === jobId ? { ...j, approvalStage: "declined_acknowledged" } : j)));
+  }
+
   function createInvoice(job, laborCharge, paymentMethod, paymentStatus) {
     const partItems = job.partsUsed.map((pu) => ({
       desc: `${partMap[pu.partId]?.name || pu.partId} x${pu.qty}`,
@@ -1210,6 +1360,7 @@ export default function AitechLabCRM() {
     ],
     indoor_tech: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { id: "myjobs", label: "My Jobs", icon: Wrench },
     ],
     outdoor_tech: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -1363,6 +1514,10 @@ export default function AitechLabCRM() {
           onSendSms={sendSmsUpdate}
           onCall={callReminder}
           onDismissReminder={dismissReminder}
+          repairAlerts={(role === "admin" || role === "frontdesk") ? repairAlerts : []}
+          onReviewRepairRequest={(jobId, estimate, serviceCharge) => reviewRepairRequest(jobId, estimate, serviceCharge, roleLabel[role] || "Office")}
+          onConfirmCustomerApproval={(jobId) => confirmCustomerApproval(jobId, roleLabel[role] || "Office")}
+          onDeclineCustomerApproval={(jobId) => declineCustomerApproval(jobId, roleLabel[role] || "Office")}
           onManualRefresh={() => {
             setLastRefresh(Date.now());
             pushToast(`Dashboard refreshed manually. ${overdueJobs.length} order(s) need attention.`, "alert");
@@ -1382,6 +1537,9 @@ export default function AitechLabCRM() {
               onWhatsApp={sendWhatsAppToJob}
               onSms={sendSmsToJob}
               onCall={callJob}
+              onPrint={setPrintInvoice}
+              onConfirmApproval={(jobId) => confirmCustomerApproval(jobId, roleLabel[role] || "Office")}
+              onDeclineApproval={(jobId) => declineCustomerApproval(jobId, roleLabel[role] || "Office")}
               smsLog={smsLog}
             />
           )}
@@ -1396,6 +1554,8 @@ export default function AitechLabCRM() {
               onUpdate={(jobId, payload) => updateJob(jobId, { ...payload, by: roleLabel[role] || "Office" })}
               onWhatsApp={sendWhatsAppToJob}
               onCall={callJob}
+              onConfirmApproval={(jobId) => confirmCustomerApproval(jobId, roleLabel[role] || "Office")}
+              onDeclineApproval={(jobId) => declineCustomerApproval(jobId, roleLabel[role] || "Office")}
               smsLog={smsLog}
             />
           )}
@@ -1405,6 +1565,14 @@ export default function AitechLabCRM() {
               role={role} tech={techMap[activeTechId]}
               onAddJob={() => setTab("newjob")}
               onAddCustomer={() => setAddingCustomer(true)}
+              onMyJobs={() => setTab("myjobs")}
+            />
+          )}
+
+          {tab === "myjobs" && role === "indoor_tech" && (
+            <MyJobsView
+              jobs={jobs.filter((j) => j.assignedTech === activeTechId)} tick={tick}
+              onSubmitRepairReport={(jobId, status, remarks) => submitRepairReport(jobId, status, remarks, techMap[activeTechId]?.name || "Technician")}
             />
           )}
 
@@ -1413,6 +1581,8 @@ export default function AitechLabCRM() {
               presetCustomer={newJobPreset}
               customers={customers}
               jobs={jobs}
+              onSms={sendSmsToJob}
+              onWhatsApp={sendWhatsAppToJob}
               onCreate={(data) => {
                 const isTech = role === "indoor_tech" || role === "outdoor_tech";
                 const creator = isTech
@@ -1449,6 +1619,8 @@ export default function AitechLabCRM() {
               onCall={callJob}
               onRequestDelete={setConfirmDeleteJob}
               onUpdate={(jobId, payload) => updateJob(jobId, { ...payload, by: roleLabel[role] || "Office" })}
+              onConfirmApproval={(jobId) => confirmCustomerApproval(jobId, roleLabel[role] || "Office")}
+              onDeclineApproval={(jobId) => declineCustomerApproval(jobId, roleLabel[role] || "Office")}
               parts={parts}
               smsLog={smsLog}
             />
@@ -1547,6 +1719,38 @@ export default function AitechLabCRM() {
             onCall={() => callReminder(popupReminder)}
             onClose={() => setPopupReminder(null)}
           />
+        </Modal>
+      )}
+
+      {confirmedRepairPopup && (
+        <Modal title="Customer Approved — Proceed with Repair" onClose={() => {}} width={420}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 16, padding: "12px 14px", background: COLORS.tealDim, border: `1px solid ${COLORS.teal}55`, borderRadius: 9 }}>
+            <CheckCircle2 size={18} color={COLORS.teal} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.5 }}>
+              The customer has confirmed they're OK with the repair on <strong style={{ fontFamily: FONT_MONO }}>{confirmedRepairPopup.id}</strong>. You're clear to proceed.
+            </div>
+          </div>
+          <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 4 }}>{confirmedRepairPopup.brand} {confirmedRepairPopup.model}</div>
+          <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 16 }}>{confirmedRepairPopup.issue}</div>
+          <Btn onClick={() => { acknowledgeRepairConfirmation(confirmedRepairPopup.id); setConfirmedRepairPopup(null); }}>
+            <CheckCircle2 size={14} /> Acknowledge &amp; Proceed
+          </Btn>
+        </Modal>
+      )}
+
+      {declinedRepairPopup && (
+        <Modal title="Customer Did Not Approve — Return TV" onClose={() => {}} width={420}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 16, padding: "12px 14px", background: COLORS.redDim, border: `1px solid ${COLORS.red}55`, borderRadius: 9 }}>
+            <X size={18} color={COLORS.red} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.5 }}>
+              The customer did not approve the repair on <strong style={{ fontFamily: FONT_MONO }}>{declinedRepairPopup.id}</strong>. Please pack up the TV for return — no repair needed.
+            </div>
+          </div>
+          <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 4 }}>{declinedRepairPopup.brand} {declinedRepairPopup.model}</div>
+          <div style={{ fontSize: 12.5, color: COLORS.muted, marginBottom: 16 }}>{declinedRepairPopup.issue}</div>
+          <Btn variant="danger" style={{ borderColor: COLORS.red, background: COLORS.redDim }} onClick={() => { acknowledgeRepairDecline(declinedRepairPopup.id); setDeclinedRepairPopup(null); }}>
+            <X size={14} /> Acknowledge
+          </Btn>
         </Modal>
       )}
 
@@ -1676,9 +1880,9 @@ function RoleSelect({ technicians, onSelect }) {
 /* ---------------------------------------------------------------------- */
 /*  TOP BAR                                                                 */
 /* ---------------------------------------------------------------------- */
-function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAlerts, overdueJobs, reminders, onSendWhatsApp, onSendSms, onCall, onDismissReminder, onManualRefresh, onOpenNav }) {
+function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAlerts, overdueJobs, reminders, onSendWhatsApp, onSendSms, onCall, onDismissReminder, repairAlerts = [], onReviewRepairRequest, onConfirmCustomerApproval, onDeclineCustomerApproval, onManualRefresh, onOpenNav }) {
   const titles = { admin: "Dashboard", frontdesk: "Front Desk", indoor_tech: "Indoor Technician", outdoor_tech: "Outdoor Technician" };
-  const reminderCount = reminders.length;
+  const reminderCount = reminders.length + repairAlerts.length;
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -1742,7 +1946,19 @@ function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAler
             boxShadow: `inset 0 1px 0 ${COLORS.glassHighlight}, 0 12px 30px rgba(0,0,0,0.4)`,
             zIndex: 40, padding: 12, maxHeight: "70vh", overflowY: "auto",
           }}>
-            {reminderCount > 0 && (
+            {repairAlerts.length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: COLORS.text, display: "flex", alignItems: "center", gap: 6 }}>
+                  <Wrench size={12} color={COLORS.teal} /> Repair Requests
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {repairAlerts.map((j) => (
+                    <RepairAlertRow key={j.id} job={j} onReview={onReviewRepairRequest} onConfirm={onConfirmCustomerApproval} onDecline={onDeclineCustomerApproval} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {reminderCount - repairAlerts.length > 0 && (
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: COLORS.text, display: "flex", alignItems: "center", gap: 6 }}>
                   <Clock size={12} color={COLORS.amber} /> 2-Hour Reminders
@@ -1781,6 +1997,64 @@ function TopBar({ role, overdueCount, lastRefresh, tick, showAlerts, setShowAler
 /*  Stage 1: initial fault-diagnosis prompt, single WhatsApp send button.  */
 /*  Stage 2+: technician picks a current status, then sends the update.   */
 /* ---------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------- */
+/*  REPAIR ALERT ROW — one card per job in the bell menu's "Repair         */
+/*  Requests" section. Two stages: "pending_review" (technician submitted  */
+/*  a diagnosis, needs a repair estimate + service charge) and             */
+/*  "awaiting_customer" (estimate sent, needs Admin/Front Desk to record   */
+/*  whether the customer said yes or no).                                  */
+/* ---------------------------------------------------------------------- */
+function RepairAlertRow({ job, onReview, onConfirm, onDecline }) {
+  const [estimate, setEstimate] = useState(job.estimate ? String(job.estimate) : "");
+  const [serviceCharge, setServiceCharge] = useState(job.serviceCharge ? String(job.serviceCharge) : "");
+  const isPendingReview = job.approvalStage === "pending_review";
+  const total = (Number(estimate) || 0) + (Number(serviceCharge) || 0);
+
+  return (
+    <Panel style={{ padding: 10, border: `1px solid ${COLORS.teal}55`, background: `${COLORS.tealDim}33` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12 }}>Job #{job.id}</span>
+        <span style={{ fontSize: 10, fontWeight: 700, color: isPendingReview ? COLORS.amber : COLORS.teal }}>
+          {isPendingReview ? "Needs estimate" : "Awaiting customer"}
+        </span>
+      </div>
+      <div style={{ fontSize: 11.5, color: COLORS.text, lineHeight: 1.4, marginBottom: 8 }}>
+        {job.customer} — {job.brand} {job.model}
+        {job.repairRemarks && <><br /><span style={{ color: COLORS.muted }}>"{job.repairRemarks}"</span></>}
+      </div>
+      {isPendingReview ? (
+        <div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <Input
+              type="number" value={estimate} onChange={(e) => setEstimate(e.target.value)}
+              placeholder="Repair estimate ₹" style={{ flex: 1, fontSize: 12 }}
+            />
+            <Input
+              type="number" value={serviceCharge} onChange={(e) => setServiceCharge(e.target.value)}
+              placeholder="Service charge ₹" style={{ flex: 1, fontSize: 12 }}
+            />
+          </div>
+          {(estimate || serviceCharge) && (
+            <div style={{ fontSize: 11, color: COLORS.muted, marginBottom: 6 }}>Total to quote: <strong style={{ fontFamily: FONT_MONO }}>{fmtMoney(total)}</strong></div>
+          )}
+          <Btn size="sm" variant="teal" style={{ width: "100%" }} disabled={!estimate && !serviceCharge} onClick={() => onReview(job.id, estimate || 0, serviceCharge || 0)}>
+            Send for Approval
+          </Btn>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 6 }}>
+          <Btn size="sm" variant="danger" style={{ flex: 1, borderColor: COLORS.red, background: COLORS.redDim }} onClick={() => onDecline(job.id)}>
+            <X size={12} /> Not Approved
+          </Btn>
+          <Btn size="sm" variant="teal" style={{ flex: 1 }} onClick={() => onConfirm(job.id)}>
+            <CheckCircle2 size={12} /> Confirmed OK
+          </Btn>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 function ReminderRow({ reminder, onSendWhatsApp, onSendSms, onCall, onDismiss }) {
   const [status, setStatus] = useState(REMINDER_STATUS_OPTIONS[0].label);
   const [days, setDays] = useState(1);
@@ -1997,7 +2271,6 @@ function FaultSelector({ fault, setFault, subFaults, setSubFaults }) {
               return (
                 <label
                   key={o.en}
-                  onClick={() => toggle(o.en)}
                   style={{
                     display: "flex", alignItems: "flex-start", gap: 11, padding: "11px 13px", borderRadius: 9,
                     background: checked ? COLORS.tealDim : COLORS.panel2,
@@ -2118,7 +2391,7 @@ function AddCustomerButton({ onClick, subtitle, style }) {
 /*  no visibility into existing/old job cards. A big "+" FAB plus a       */
 /*  matching CTA card is the entire page.                                  */
 /* ---------------------------------------------------------------------- */
-function TechnicianDashboard({ role, tech, onAddJob, onAddCustomer }) {
+function TechnicianDashboard({ role, tech, onAddJob, onAddCustomer, onMyJobs }) {
   const roleTitle = role === "indoor_tech" ? "Indoor Technician" : "Outdoor Technician";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18, position: "relative", minHeight: 420 }}>
@@ -2131,6 +2404,12 @@ function TechnicianDashboard({ role, tech, onAddJob, onAddCustomer }) {
         <AddJobButton onClick={onAddJob} subtitle="Log a new TV intake — fault photo, section-wise fault checklist, all in one go" />
         <AddCustomerButton onClick={onAddCustomer} subtitle="Log a caller or walk-in before a TV arrives" />
       </div>
+
+      {role === "indoor_tech" && onMyJobs && (
+        <Btn variant="outline" onClick={onMyJobs} style={{ alignSelf: "flex-start" }}>
+          <Wrench size={14} /> My Jobs
+        </Btn>
+      )}
 
       {/* Floating "+" shortcut, always reachable while scrolling */}
       <button
@@ -2148,7 +2427,193 @@ function TechnicianDashboard({ role, tech, onAddJob, onAddCustomer }) {
   );
 }
 
-function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandingDues, pendingOrders, overdueJobs, tick, onAddJob, onAddCustomer, onUpdate, onWhatsApp, onSms, onCall, smsLog }) {
+/* ---------------------------------------------------------------------- */
+/*  MY JOBS (Indoor Technician) — jobs assigned to this technician, with   */
+/*  customer name, phone, location, and estimated cost deliberately        */
+/*  withheld. Everything needed to actually do the repair (device, fault   */
+/*  detail, sub-sections, photos, status, parts, timeline) is shown.       */
+/* ---------------------------------------------------------------------- */
+function MyJobsView({ jobs, tick, onSubmitRepairReport }) {
+  const [detail, setDetail] = useState(null);
+  const active = jobs.filter((j) => j.status !== "Delivered");
+  const done = jobs.filter((j) => j.status === "Delivered");
+
+  const stageBadge = (j) => {
+    if (j.approvalStage === "pending_review") return { label: "Awaiting review", color: COLORS.amber };
+    if (j.approvalStage === "awaiting_customer") return { label: "Awaiting customer", color: COLORS.blue };
+    if (j.approvalStage === "confirmed" || j.approvalStage === "acknowledged") return { label: "Approved to proceed", color: COLORS.teal };
+    if (j.approvalStage === "declined" || j.approvalStage === "declined_acknowledged") return { label: "Return to customer", color: COLORS.red };
+    return null;
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 800, fontSize: 15.5 }}>My Jobs</div>
+        <div style={{ fontSize: 12, color: COLORS.faint, marginTop: 2 }}>
+          {active.length} active job{active.length === 1 ? "" : "s"} assigned to you.
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {active.length === 0 && <div style={{ color: COLORS.faint, fontSize: 13 }}>No jobs assigned to you right now.</div>}
+        {sortByUrgency(active).map((j) => {
+          const stage = stageBadge(j);
+          return (
+            <Panel key={j.id} style={{ padding: 15, cursor: "pointer" }} onClick={() => setDetail(j)}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 5, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13.5 }}>{j.id}</span>
+                <Badge status={j.status} />
+                {stage && (
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: stage.color, background: `${stage.color}22`, padding: "2px 8px", borderRadius: 999 }}>
+                    {stage.label}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 13.5, fontWeight: 600 }}>{j.brand} {j.model}</div>
+              <div style={{ fontSize: 12.5, color: COLORS.muted, marginTop: 2 }}>{j.issue}</div>
+              <FaultTags job={j} />
+              <div style={{ fontSize: 11, color: COLORS.faint, marginTop: 6 }}>Intake {timeAgo(j.intake, tick)}</div>
+            </Panel>
+          );
+        })}
+      </div>
+
+      {done.length > 0 && (
+        <div style={{ marginTop: 22 }}>
+          <div style={{ fontSize: 12.5, color: COLORS.faint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 10 }}>Delivered</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {done.map((j) => (
+              <div
+                key={j.id} onClick={() => setDetail(j)}
+                style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, padding: "8px 10px", borderBottom: `1px solid ${COLORS.border}`, color: COLORS.muted, cursor: "pointer" }}
+              >
+                <span style={{ fontFamily: FONT_MONO }}>{j.id}</span><span>{j.brand} {j.model}</span><Badge status={j.status} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {detail && (
+        <Modal title={`${detail.id} — Job Details`} onClose={() => setDetail(null)}>
+          {(() => {
+            const stage = stageBadge(detail);
+            return stage ? (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "10px 12px",
+                background: `${stage.color}1c`, border: `1px solid ${stage.color}55`, borderRadius: 8,
+              }}>
+                {detail.approvalStage === "awaiting_customer" ? <Clock size={14} color={stage.color} /> : detail.approvalStage === "declined" || detail.approvalStage === "declined_acknowledged" ? <X size={14} color={stage.color} /> : <CheckCircle2 size={14} color={stage.color} />}
+                <span style={{ fontSize: 12.5, color: COLORS.text }}>
+                  {detail.approvalStage === "pending_review" && "Your diagnosis has been submitted — waiting on Admin/Front Desk to review and set an estimate."}
+                  {detail.approvalStage === "awaiting_customer" && "Estimate sent — Admin/Front Desk is waiting on the customer's OK before you proceed."}
+                  {(detail.approvalStage === "confirmed" || detail.approvalStage === "acknowledged") && "Customer confirmed — you're clear to proceed with the repair."}
+                  {(detail.approvalStage === "declined" || detail.approvalStage === "declined_acknowledged") && "Customer did not approve the repair — pack up the TV for return, no repair needed."}
+                </span>
+              </div>
+            ) : null;
+          })()}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16, fontSize: 12.5 }} className="form-grid-2col">
+            <div><span style={{ color: COLORS.faint }}>Device:</span> {detail.brand} {detail.model}</div>
+            <div><span style={{ color: COLORS.faint }}>Status:</span> <Badge status={detail.status} /></div>
+            <div style={{ gridColumn: "1 / -1" }}><span style={{ color: COLORS.faint }}>Issue:</span> {detail.issue}</div>
+            {detail.accessories && (
+              <div style={{ gridColumn: "1 / -1" }}><span style={{ color: COLORS.faint }}>Accessories:</span> {detail.accessories}</div>
+            )}
+            {detail.fault && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                <span style={{ color: COLORS.faint }}>Section-wise Fault:</span>
+                <FaultTags job={detail} />
+              </div>
+            )}
+            {detail.partsUsed.length > 0 && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                <span style={{ color: COLORS.faint }}>Parts used:</span> {detail.partsUsed.map((p) => `${p.partId} x${p.qty}`).join(", ")}
+              </div>
+            )}
+            {(detail.faultPhoto || detail.readyPhoto) && (
+              <div style={{ gridColumn: "1 / -1", display: "flex", gap: 14, marginTop: 4 }}>
+                {detail.faultPhoto && (
+                  <div>
+                    <div style={{ fontSize: 10.5, color: COLORS.faint, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.3 }}>Fault Photo</div>
+                    <img src={detail.faultPhoto} alt="Fault" style={{ width: 120, height: 88, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
+                  </div>
+                )}
+                {detail.readyPhoto && (
+                  <div>
+                    <div style={{ fontSize: 10.5, color: COLORS.faint, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.3 }}>TV Ready Photo</div>
+                    <img src={detail.readyPhoto} alt="TV ready for delivery" style={{ width: 120, height: 88, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {onSubmitRepairReport && detail.status !== "Delivered" && detail.approvalStage !== "declined" && detail.approvalStage !== "declined_acknowledged" && (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4, color: COLORS.faint }}>
+                Update Repair Status &amp; Remarks
+              </div>
+              <RepairReportForm
+                job={detail}
+                onSubmit={(status, remarks) => { onSubmitRepairReport(detail.id, status, remarks); setDetail(null); }}
+              />
+              <div style={{ height: 18 }} />
+            </>
+          )}
+
+          <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4, color: COLORS.faint }}>Update Timeline</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {detail.updates.map((u, i) => (
+              <div key={i} style={{ display: "flex", gap: 10 }}>
+                <div style={{ width: 8, height: 8, borderRadius: 999, background: COLORS.amber, marginTop: 5, flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 12.5 }}><strong>{u.by}</strong> — {u.note}</div>
+                  <div style={{ fontSize: 11, color: COLORS.faint }}>{fmtDateTime(u.ts)} · <Badge status={u.status} /></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* Technician's repair status + remarks submission — status choices stay
+   limited to Pending/In Progress/Completed (no Delivered — that's a
+   front-desk action gated behind the TV Ready photo). Submitting moves
+   the job into the "pending_review" approval stage. */
+function RepairReportForm({ job, onSubmit }) {
+  const [status, setStatus] = useState(job.status === "Delivered" ? "Completed" : job.status);
+  const [remarks, setRemarks] = useState("");
+
+  return (
+    <div>
+      <Field label="Current TV Status">
+        <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+          {["Pending", "In Progress", "Completed"].map((s) => <option key={s}>{s}</option>)}
+        </Select>
+      </Field>
+      <div style={{ height: 10 }} />
+      <Field label="Remarks / Solution">
+        <TextArea
+          value={remarks} onChange={(e) => setRemarks(e.target.value)}
+          placeholder="e.g. Backlight strip burnt, needs replacement. Repair possible, part on hand."
+        />
+      </Field>
+      <div style={{ marginTop: 12 }}>
+        <Btn disabled={!remarks.trim()} onClick={() => onSubmit(status, remarks.trim())}>
+          <Wrench size={13} /> Submit for Approval
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandingDues, pendingOrders, overdueJobs, tick, onAddJob, onAddCustomer, onUpdate, onWhatsApp, onSms, onCall, onPrint, onConfirmApproval, onDeclineApproval, smsLog }) {
   const lowStock = parts.filter((p) => p.qty <= p.low);
   const workload = technicians.map((t) => ({
     ...t,
@@ -2158,8 +2623,20 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
   const maxActive = Math.max(1, ...workload.map((w) => w.active));
   const [showPendingList, setShowPendingList] = useState(false);
   const [showOverdueList, setShowOverdueList] = useState(false);
+  const [showTotalRevenue, setShowTotalRevenue] = useState(false);
+  const [totalRevFrom, setTotalRevFrom] = useState("");
+  const [totalRevTo, setTotalRevTo] = useState("");
   const [detailJob, setDetailJob] = useState(null);
   const [editingJob, setEditingJob] = useState(null);
+
+  const totalRevRangeInvoices = invoices.filter((inv) => {
+    if (inv.paymentStatus !== "Paid" || !inv.paidAt) return false;
+    const d = new Date(inv.paidAt);
+    if (totalRevFrom && d < new Date(totalRevFrom + "T00:00:00")) return false;
+    if (totalRevTo && d > new Date(totalRevTo + "T23:59:59")) return false;
+    return true;
+  });
+  const totalRevInRange = totalRevRangeInvoices.reduce((sum, inv) => sum + inv.total, 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -2174,6 +2651,12 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
         <StatCard icon={AlertTriangle} label="Outstanding Dues" value={fmtMoney(outstandingDues)} sub="Unpaid invoices" accent={COLORS.red} />
         <StatCard icon={Clock} label="Overdue (>2h)" value={overdueJobs.length} sub="Tap to view the list" accent={COLORS.red} onClick={() => setShowOverdueList(true)} />
       </div>
+
+      {/* Nothing about total revenue is ever displayed here — the figure only
+          appears once this button is tapped and the modal is opened. */}
+      <Btn variant="outline" onClick={() => setShowTotalRevenue(true)} style={{ alignSelf: "flex-start" }}>
+        <Eye size={14} /> View Total Revenue (Custom Dates)
+      </Btn>
 
       {overdueJobs.length > 0 && (
         <Panel style={{ padding: 16, border: `1px solid ${COLORS.red}55`, background: `${COLORS.redDim}55` }}>
@@ -2334,7 +2817,7 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
 
       {detailJob && (
         <Modal title={`${detailJob.id} — Job History`} onClose={() => setDetailJob(null)}>
-          <JobDetail job={detailJob} technicians={technicians} onWhatsApp={onWhatsApp} onSms={onSms} onCall={onCall} smsLog={smsLog} />
+          <JobDetail job={detailJob} technicians={technicians} onWhatsApp={onWhatsApp} onSms={onSms} onCall={onCall} onConfirmApproval={onConfirmApproval} onDeclineApproval={onDeclineApproval} smsLog={smsLog} />
           {detailJob.status !== "Delivered" && (
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.border}` }}>
               <Btn onClick={() => { setEditingJob(detailJob); setDetailJob(null); }}>
@@ -2350,7 +2833,63 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
           <UpdateJobForm
             job={editingJob} parts={parts}
             onSave={(payload) => { onUpdate(editingJob.id, payload); setEditingJob(null); }}
+            onWhatsApp={onWhatsApp}
           />
+        </Modal>
+      )}
+
+      {showTotalRevenue && (
+        <Modal title="Total Revenue — Custom Dates" onClose={() => setShowTotalRevenue(false)} width={560}>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Field label="From">
+              <Input type="date" value={totalRevFrom} onChange={(e) => setTotalRevFrom(e.target.value)} />
+            </Field>
+            <Field label="To">
+              <Input type="date" value={totalRevTo} onChange={(e) => setTotalRevTo(e.target.value)} />
+            </Field>
+          </div>
+
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, marginBottom: 16, padding: "14px 16px",
+            background: COLORS.tealDim, border: `1px solid ${COLORS.teal}55`, borderRadius: 10,
+          }}>
+            <IndianRupee size={22} color={COLORS.teal} />
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONT_MONO, color: COLORS.text }}>{fmtMoney(totalRevInRange)}</div>
+              <div style={{ fontSize: 11.5, color: COLORS.faint }}>
+                {totalRevFrom || totalRevTo
+                  ? `${totalRevFrom ? fmtDate(new Date(totalRevFrom + "T00:00:00").getTime()) : "the beginning"} → ${totalRevTo ? fmtDate(new Date(totalRevTo + "T00:00:00").getTime()) : "today"}`
+                  : "All time (no dates selected)"}
+                {" "}· {totalRevRangeInvoices.length} paid invoice{totalRevRangeInvoices.length === 1 ? "" : "s"}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4, color: COLORS.faint }}>
+            Contributing Payments
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+            {totalRevRangeInvoices.length === 0 && <div style={{ fontSize: 12.5, color: COLORS.faint }}>No paid invoices in this range.</div>}
+            {totalRevRangeInvoices.map((inv) => {
+              const PayIcon = PAY_ICON[inv.paymentMethod] || Banknote;
+              return (
+                <div key={inv.id} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "9px 11px", borderRadius: 8,
+                  background: COLORS.panel2, border: `1px solid ${COLORS.border}`, flexWrap: "wrap",
+                }}>
+                  <div style={{ flex: 1, minWidth: 160 }}>
+                    <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12 }}>{inv.id} <span style={{ color: COLORS.faint, fontWeight: 400, fontFamily: FONT_SANS }}>— {inv.customer}</span></div>
+                    <div style={{ fontSize: 10.5, color: COLORS.faint }}>{inv.jobId} · paid {fmtDate(inv.paidAt)}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: COLORS.muted }}>
+                    <PayIcon size={12} /> {inv.paymentMethod}
+                  </div>
+                  <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12.5, color: COLORS.teal }}>{fmtMoney(inv.total)}</div>
+                  {onPrint && <Btn size="sm" variant="outline" onClick={() => onPrint(inv)}><Printer size={12} /></Btn>}
+                </div>
+              );
+            })}
+          </div>
         </Modal>
       )}
     </div>
@@ -2362,7 +2901,7 @@ function techMapName(technicians, id) { return technicians.find((t) => t.id === 
 /*  FRONT DESK DASHBOARD                                                    */
 /*  Today's pending orders lead the page; completed orders sit below.       */
 /* ---------------------------------------------------------------------- */
-function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, onSms, onWhatsApp, onCall, onAddJob, onAddCustomer, parts, onUpdate, smsLog }) {
+function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, onSms, onWhatsApp, onCall, onAddJob, onAddCustomer, parts, onUpdate, onConfirmApproval, onDeclineApproval, smsLog }) {
   const pending = sortByUrgency(jobs.filter((j) => j.status === "Pending" || j.status === "In Progress"));
   const pendingToday = pending.filter((j) => isSameDay(j.intake));
   const unassigned = pending.filter((j) => !j.assignedTech);
@@ -2490,7 +3029,7 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
 
       {detailJob && (
         <Modal title={`${detailJob.id} — Job History`} onClose={() => setDetailJob(null)}>
-          <JobDetail job={detailJob} technicians={technicians} onWhatsApp={onWhatsApp} onSms={onSms} onCall={onCall} smsLog={smsLog} />
+          <JobDetail job={detailJob} technicians={technicians} onWhatsApp={onWhatsApp} onSms={onSms} onCall={onCall} onConfirmApproval={onConfirmApproval} onDeclineApproval={onDeclineApproval} smsLog={smsLog} />
           {detailJob.status !== "Delivered" && (
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${COLORS.border}` }}>
               <Btn onClick={() => { setEditingJob(detailJob); setDetailJob(null); }}>
@@ -2506,6 +3045,7 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
           <UpdateJobForm
             job={editingJob} parts={parts}
             onSave={(payload) => { onUpdate(editingJob.id, payload); setEditingJob(null); }}
+            onWhatsApp={onWhatsApp}
           />
         </Modal>
       )}
@@ -2516,7 +3056,10 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
 /* ---------------------------------------------------------------------- */
 /*  NEW JOB FORM (Front Desk)                                              */
 /* ---------------------------------------------------------------------- */
-function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [] }) {
+function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [], onSms, onWhatsApp }) {
+  // Reserve the Job ID the moment this form opens, so staff see exactly
+  // which JID this intake will become before they even fill it in.
+  const [previewId] = useState(() => nextDailyId("JID"));
   const blank = {
     customer: presetCustomer?.name || "", phone: presetCustomer?.phone || "", location: presetCustomer?.location || "",
     brand: "", model: "", issue: "", accessories: "", estimate: "", fault: DEFAULT_FAULTS[0],
@@ -2557,9 +3100,17 @@ function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [] }) {
 
   return (
     <Panel style={{ padding: 22, maxWidth: 640 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 14 }}>
         <Plus size={17} color={COLORS.amber} />
         <div style={{ fontWeight: 800, fontSize: 15.5 }}>New Job Card — Intake</div>
+      </div>
+
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 18,
+        padding: "12px 16px", borderRadius: 10, background: COLORS.amberDim, border: `1px solid ${COLORS.amber}55`,
+      }}>
+        <span style={{ fontSize: 11, color: COLORS.muted, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>New Job ID</span>
+        <span style={{ fontFamily: FONT_MONO, fontWeight: 800, fontSize: 18, letterSpacing: 0.5, color: COLORS.amber }}>{previewId}</span>
       </div>
 
       {sortedCustomers.length > 0 && (
@@ -2614,15 +3165,32 @@ function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [] }) {
       <div style={{ marginTop: 18, display: "flex", gap: 10, flexWrap: "wrap" }}>
         <Btn
           disabled={!valid}
-          onClick={() => { onCreate({ ...f, estimate: Number(f.estimate) || 0, subFaults, faultPhoto, customerId: selectedCustomerId || null }); reset(); }}
+          onClick={() => { onCreate({ ...f, id: previewId, estimate: Number(f.estimate) || 0, subFaults, faultPhoto, customerId: selectedCustomerId || null }); reset(); }}
         >
           <Plus size={14} /> Create Job Card &amp; Send SMS
         </Btn>
+        {onSms && (
+          <Btn
+            variant="outline" disabled={!f.customer.trim() || f.phone.trim().length < 10}
+            onClick={() => onSms({ id: previewId, customer: f.customer, phone: f.phone, brand: f.brand, model: f.model, status: "Pending", fault: f.fault, subFaults })}
+          >
+            <MessageSquare size={14} /> Send SMS
+          </Btn>
+        )}
+        {onWhatsApp && (
+          <Btn
+            variant="teal" disabled={!f.customer.trim() || f.phone.trim().length < 10}
+            onClick={() => onWhatsApp({ id: previewId, customer: f.customer, phone: f.phone, brand: f.brand, model: f.model, status: "Pending", fault: f.fault, subFaults })}
+          >
+            <MessageSquare size={14} /> Send WhatsApp Update
+          </Btn>
+        )}
         <Btn variant="outline" onClick={reset}>Clear</Btn>
       </div>
       <div style={{ marginTop: 12, fontSize: 11.5, color: COLORS.faint }}>
         Creating a job card automatically sends an SMS confirmation to the customer with their Job ID, and starts
         the automated 2-hour reminder cycle (based on the default fault selected above) until the job is marked Completed.
+        The Send SMS / WhatsApp buttons let you message the customer with the reserved Job ID before saving, if needed.
       </div>
     </Panel>
   );
@@ -2885,7 +3453,7 @@ function CustomerDetail({ customer, jobs, tick, onAddNote, onCreateJob, onWhatsA
   );
 }
 
-function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, onSms, onWhatsApp, onCall, onRequestDelete, onUpdate, parts, smsLog = [] }) {
+function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, onSms, onWhatsApp, onCall, onRequestDelete, onUpdate, onConfirmApproval, onDeclineApproval, parts, smsLog = [] }) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [detail, setDetail] = useState(null);
@@ -2979,7 +3547,7 @@ function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, o
 
       {detail && (
         <Modal title={`${detail.id} — Job History`} onClose={() => setDetail(null)}>
-          <JobDetail job={detail} technicians={technicians} onWhatsApp={onWhatsApp} onSms={onSms} onCall={onCall} smsLog={smsLog} />
+          <JobDetail job={detail} technicians={technicians} onWhatsApp={onWhatsApp} onSms={onSms} onCall={onCall} onConfirmApproval={onConfirmApproval} onDeclineApproval={onDeclineApproval} smsLog={smsLog} />
         </Modal>
       )}
 
@@ -2988,6 +3556,7 @@ function JobCardsList({ jobs, technicians, role, tick, onPrintLabel, onAssign, o
           <UpdateJobForm
             job={editing} parts={parts}
             onSave={(payload) => { onUpdate(editing.id, payload); setEditing(null); }}
+            onWhatsApp={onWhatsApp}
           />
         </Modal>
       )}
@@ -3001,7 +3570,7 @@ function messageChannel(message) {
   return "SMS";
 }
 
-function JobDetail({ job, technicians, onWhatsApp, onSms, onCall, smsLog = [] }) {
+function JobDetail({ job, technicians, onWhatsApp, onSms, onCall, onConfirmApproval, onDeclineApproval, smsLog = [] }) {
   const jobMessages = [...smsLog].filter((m) => m.jobId === job.id).sort((a, b) => b.ts - a.ts);
   const counts = jobMessages.reduce(
     (acc, m) => { const ch = messageChannel(m.message); acc[ch] = (acc[ch] || 0) + 1; return acc; },
@@ -3011,6 +3580,51 @@ function JobDetail({ job, technicians, onWhatsApp, onSms, onCall, smsLog = [] })
 
   return (
     <div>
+      {job.approvalStage === "pending_review" && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 16, padding: "10px 12px", background: `${COLORS.amber}1c`, border: `1px solid ${COLORS.amber}55`, borderRadius: 8 }}>
+          <Wrench size={14} color={COLORS.amber} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.4 }}>
+            Technician submitted a diagnosis and is awaiting review.
+            {job.repairRemarks && <><br /><span style={{ color: COLORS.muted }}>"{job.repairRemarks}"</span></>}
+            <br /><span style={{ color: COLORS.muted }}>Set an estimate from the bell icon's Repair Requests menu.</span>
+          </div>
+        </div>
+      )}
+      {job.approvalStage === "awaiting_customer" && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 16, padding: "10px 12px", background: `${COLORS.blue}1c`, border: `1px solid ${COLORS.blue}55`, borderRadius: 8 }}>
+          <Clock size={14} color={COLORS.blue} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.4, flex: 1 }}>
+            Quote sent — repair {fmtMoney(job.estimate || 0)} + service {fmtMoney(job.serviceCharge || 0)} = <strong>{fmtMoney((job.estimate || 0) + (job.serviceCharge || 0))}</strong>. Awaiting the customer's OK to proceed.
+            {job.repairRemarks && <><br /><span style={{ color: COLORS.muted }}>"{job.repairRemarks}"</span></>}
+            {(onConfirmApproval || onDeclineApproval) && (
+              <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
+                {onDeclineApproval && (
+                  <Btn size="sm" variant="danger" style={{ borderColor: COLORS.red, background: COLORS.redDim }} onClick={() => onDeclineApproval(job.id)}>
+                    <X size={12} /> Not Approved
+                  </Btn>
+                )}
+                {onConfirmApproval && (
+                  <Btn size="sm" variant="teal" onClick={() => onConfirmApproval(job.id)}>
+                    <CheckCircle2 size={12} /> Confirmed OK
+                  </Btn>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {(job.approvalStage === "confirmed" || job.approvalStage === "acknowledged") && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "10px 12px", background: COLORS.tealDim, border: `1px solid ${COLORS.teal}55`, borderRadius: 8 }}>
+          <CheckCircle2 size={14} color={COLORS.teal} />
+          <span style={{ fontSize: 12.5, color: COLORS.text }}>Customer confirmed — technician is clear to proceed.</span>
+        </div>
+      )}
+      {(job.approvalStage === "declined" || job.approvalStage === "declined_acknowledged") && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "10px 12px", background: COLORS.redDim, border: `1px solid ${COLORS.red}55`, borderRadius: 8 }}>
+          <X size={14} color={COLORS.red} />
+          <span style={{ fontSize: 12.5, color: COLORS.text }}>Customer did not approve the repair — service charge invoice generated, TV ready for return.</span>
+        </div>
+      )}
       {(onWhatsApp || onSms || onCall) && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
           {onCall && (
@@ -3123,7 +3737,7 @@ function JobDetail({ job, technicians, onWhatsApp, onSms, onCall, smsLog = [] })
   );
 }
 
-function UpdateJobForm({ job, parts, onSave }) {
+function UpdateJobForm({ job, parts, onSave, onWhatsApp }) {
   const [status, setStatus] = useState(job.status);
   const [note, setNote] = useState("");
   const [reason, setReason] = useState(IN_PROGRESS_REASONS[0]);
@@ -3206,19 +3820,31 @@ function UpdateJobForm({ job, parts, onSave }) {
         </>
       )}
 
-      <div style={{ marginTop: 18, display: "flex", gap: 10 }}>
+      <div style={{ marginTop: 18, display: "flex", gap: 10, flexWrap: "wrap" }}>
         <Btn
           disabled={!canSave}
           onClick={() => onSave({ status, note: buildNote(), partsUsedDelta: validRows, fault, subFaults, readyPhoto, location })}
         >
-          <CheckCircle2 size={14} /> Save &amp; Notify Customer
+          <CheckCircle2 size={14} /> Save &amp; SMS Update
         </Btn>
+        {onWhatsApp && (
+          <Btn
+            variant="teal" disabled={!canSave}
+            onClick={() => {
+              onSave({ status, note: buildNote(), partsUsedDelta: validRows, fault, subFaults, readyPhoto, location });
+              onWhatsApp({ ...job, status, fault, subFaults });
+            }}
+          >
+            <MessageSquare size={14} /> Save &amp; WhatsApp Update
+          </Btn>
+        )}
       </div>
       {isDelivering && !readyPhoto && (
         <div style={{ marginTop: 8, fontSize: 11.5, color: COLORS.amber }}>Add a "TV Ready" photo before marking this job Delivered.</div>
       )}
       <div style={{ marginTop: 10, fontSize: 11.5, color: COLORS.faint }}>
-        Saving sends an SMS update to the customer, deducts used parts from inventory, and records the section-wise fault checklist for the next 2-hour reminder.
+        Both buttons save the status, parts, and fault checklist and deduct used parts from inventory — "Save &amp; SMS Update" notifies the customer by SMS, "Save &amp; WhatsApp Update" also opens WhatsApp with the same update.
+        The WhatsApp button lets you message the customer immediately without saving these changes yet.
       </div>
     </div>
   );
@@ -3232,10 +3858,37 @@ function Billing({ jobs, invoices, parts, role, onCreateInvoice, onMarkPaid, onP
   const [billingJob, setBillingJob] = useState(null);
   const [showTodayInvoices, setShowTodayInvoices] = useState(false);
   const [showTodayRevenue, setShowTodayRevenue] = useState(false);
+  const [showTotalRevenue, setShowTotalRevenue] = useState(false);
+  const [totalRevFrom, setTotalRevFrom] = useState("");
+  const [totalRevTo, setTotalRevTo] = useState("");
+  const revenueClickTimes = useRef([]);
   const isAdmin = role === "admin";
+
+  // Tap "Revenue Today" 5x in quick succession (within ~1.2s between taps)
+  // to open the hidden "Total Revenue" view with a custom date range —
+  // a quick shortcut for admins who want a number outside "today".
+  function handleRevenueTap() {
+    const now = Date.now();
+    revenueClickTimes.current = [...revenueClickTimes.current.filter((t) => now - t < 1200), now];
+    if (revenueClickTimes.current.length >= 5) {
+      revenueClickTimes.current = [];
+      setShowTotalRevenue(true);
+    } else {
+      setShowTodayRevenue(true);
+    }
+  }
 
   const todayInvoices = invoices.filter((inv) => isSameDay(inv.createdAt));
   const todayPaidInvoices = invoices.filter((inv) => inv.paymentStatus === "Paid" && isSameDay(inv.paidAt));
+
+  const totalRevRangeInvoices = invoices.filter((inv) => {
+    if (inv.paymentStatus !== "Paid" || !inv.paidAt) return false;
+    const d = new Date(inv.paidAt);
+    if (totalRevFrom && d < new Date(totalRevFrom + "T00:00:00")) return false;
+    if (totalRevTo && d > new Date(totalRevTo + "T23:59:59")) return false;
+    return true;
+  });
+  const totalRevInRange = totalRevRangeInvoices.reduce((sum, inv) => sum + inv.total, 0);
 
   // ---- date filter for "All Invoices" (also drives the revenue summary below) ----
   const [filterMode, setFilterMode] = useState("all"); // all | day | month | custom
@@ -3274,7 +3927,7 @@ function Billing({ jobs, invoices, parts, role, onCreateInvoice, onMarkPaid, onP
         {isAdmin && (
           <StatCard
             icon={IndianRupee} label="Revenue Today" value={fmtMoney(revenueToday)} sub="Today · tap to view"
-            accent={COLORS.teal} onClick={() => setShowTodayRevenue(true)}
+            accent={COLORS.teal} onClick={handleRevenueTap}
           />
         )}
         <StatCard icon={AlertTriangle} label="Outstanding Dues" value={fmtMoney(outstandingDues)} accent={COLORS.red} />
@@ -3298,68 +3951,70 @@ function Billing({ jobs, invoices, parts, role, onCreateInvoice, onMarkPaid, onP
         ))}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, flexWrap: "wrap", gap: 10 }}>
-        <div style={{ fontWeight: 700, fontSize: 13.5 }}>All Invoices</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <Select value={filterMode} onChange={(e) => setFilterMode(e.target.value)} style={{ width: 150 }}>
-            <option value="all">All time</option>
-            <option value="day">Per day</option>
-            <option value="month">Per month</option>
-            <option value="custom">Custom range</option>
-          </Select>
-          {filterMode === "day" && (
-            <Input type="date" value={filterDay} onChange={(e) => setFilterDay(e.target.value)} style={{ width: 150 }} />
-          )}
-          {filterMode === "month" && (
-            <Input type="month" value={filterMonth} onChange={(e) => setFilterMonth(e.target.value)} style={{ width: 150 }} />
-          )}
-          {filterMode === "custom" && (
-            <>
-              <Input type="date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} placeholder="From" style={{ width: 145 }} />
-              <Input type="date" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} placeholder="To" style={{ width: 145 }} />
-            </>
-          )}
-        </div>
-      </div>
       {isAdmin && (
-        <div style={{
-          display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "9px 12px",
-          background: COLORS.tealDim, border: `1px solid ${COLORS.teal}55`, borderRadius: 8,
-        }}>
-          <IndianRupee size={14} color={COLORS.teal} />
-          <span style={{ fontSize: 12.5, color: COLORS.text }}>
-            Revenue for {filterRangeLabel}: <strong style={{ fontFamily: FONT_MONO }}>{fmtMoney(filteredRevenue)}</strong>
-            <span style={{ color: COLORS.faint }}> ({filteredInvoices.length} invoice{filteredInvoices.length === 1 ? "" : "s"})</span>
-          </span>
-        </div>
+        <>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, flexWrap: "wrap", gap: 10 }}>
+            <div style={{ fontWeight: 700, fontSize: 13.5 }}>All Invoices</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <Select value={filterMode} onChange={(e) => setFilterMode(e.target.value)} style={{ width: 150 }}>
+                <option value="all">All time</option>
+                <option value="day">Per day</option>
+                <option value="month">Per month</option>
+                <option value="custom">Custom range</option>
+              </Select>
+              {filterMode === "day" && (
+                <Input type="date" value={filterDay} onChange={(e) => setFilterDay(e.target.value)} style={{ width: 150 }} />
+              )}
+              {filterMode === "month" && (
+                <Input type="month" value={filterMonth} onChange={(e) => setFilterMonth(e.target.value)} style={{ width: 150 }} />
+              )}
+              {filterMode === "custom" && (
+                <>
+                  <Input type="date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} placeholder="From" style={{ width: 145 }} />
+                  <Input type="date" value={filterTo} onChange={(e) => setFilterTo(e.target.value)} placeholder="To" style={{ width: 145 }} />
+                </>
+              )}
+            </div>
+          </div>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "9px 12px",
+            background: COLORS.tealDim, border: `1px solid ${COLORS.teal}55`, borderRadius: 8,
+          }}>
+            <IndianRupee size={14} color={COLORS.teal} />
+            <span style={{ fontSize: 12.5, color: COLORS.text }}>
+              Revenue for {filterRangeLabel}: <strong style={{ fontFamily: FONT_MONO }}>{fmtMoney(filteredRevenue)}</strong>
+              <span style={{ color: COLORS.faint }}> ({filteredInvoices.length} invoice{filteredInvoices.length === 1 ? "" : "s"})</span>
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {filteredInvoices.length === 0 && <div style={{ color: COLORS.faint, fontSize: 12.5 }}>No invoices in this range.</div>}
+            {filteredInvoices.map((inv) => {
+              const PayIcon = PAY_ICON[inv.paymentMethod] || Banknote;
+              return (
+                <Panel key={inv.id} style={{ padding: 13, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 180 }}>
+                    <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12.5 }}>{inv.id} <span style={{ color: COLORS.faint, fontWeight: 400, fontFamily: FONT_SANS }}>— {inv.customer}</span></div>
+                    <div style={{ fontSize: 11.5, color: COLORS.faint }}>{inv.jobId} · {fmtDate(inv.createdAt)}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: COLORS.muted, width: 110 }}>
+                    <PayIcon size={13} /> {inv.paymentMethod}
+                  </div>
+                  <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13.5, width: 90 }}>{fmtMoney(inv.total)}</div>
+                  <span style={{
+                    fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                    color: inv.paymentStatus === "Paid" ? COLORS.teal : COLORS.amber,
+                    background: inv.paymentStatus === "Paid" ? COLORS.tealDim : COLORS.amberDim,
+                  }}>{inv.paymentStatus}</span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {inv.paymentStatus === "Pending" && <Btn size="sm" variant="teal" onClick={() => onMarkPaid(inv.id)}>Mark Paid</Btn>}
+                    <Btn size="sm" variant="outline" onClick={() => onPrint(inv)}><Printer size={13} /> Print</Btn>
+                  </div>
+                </Panel>
+              );
+            })}
+          </div>
+        </>
       )}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {filteredInvoices.length === 0 && <div style={{ color: COLORS.faint, fontSize: 12.5 }}>No invoices in this range.</div>}
-        {filteredInvoices.map((inv) => {
-          const PayIcon = PAY_ICON[inv.paymentMethod] || Banknote;
-          return (
-            <Panel key={inv.id} style={{ padding: 13, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-              <div style={{ flex: 1, minWidth: 180 }}>
-                <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12.5 }}>{inv.id} <span style={{ color: COLORS.faint, fontWeight: 400, fontFamily: FONT_SANS }}>— {inv.customer}</span></div>
-                <div style={{ fontSize: 11.5, color: COLORS.faint }}>{inv.jobId} · {fmtDate(inv.createdAt)}</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: COLORS.muted, width: 110 }}>
-                <PayIcon size={13} /> {inv.paymentMethod}
-              </div>
-              <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13.5, width: 90 }}>{fmtMoney(inv.total)}</div>
-              <span style={{
-                fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
-                color: inv.paymentStatus === "Paid" ? COLORS.teal : COLORS.amber,
-                background: inv.paymentStatus === "Paid" ? COLORS.tealDim : COLORS.amberDim,
-              }}>{inv.paymentStatus}</span>
-              <div style={{ display: "flex", gap: 6 }}>
-                {inv.paymentStatus === "Pending" && <Btn size="sm" variant="teal" onClick={() => onMarkPaid(inv.id)}>Mark Paid</Btn>}
-                <Btn size="sm" variant="outline" onClick={() => onPrint(inv)}><Printer size={13} /> Print</Btn>
-              </div>
-            </Panel>
-          );
-        })}
-      </div>
 
       {billingJob && (
         <Modal title={`Generate Invoice — ${billingJob.id}`} onClose={() => setBillingJob(null)}>
@@ -3422,6 +4077,60 @@ function Billing({ jobs, invoices, parts, role, onCreateInvoice, onMarkPaid, onP
                   </div>
                   <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 13.5, color: COLORS.teal }}>{fmtMoney(inv.total)}</div>
                   <Btn size="sm" variant="outline" onClick={() => onPrint(inv)}><Printer size={13} /></Btn>
+                </div>
+              );
+            })}
+          </div>
+        </Modal>
+      )}
+
+      {showTotalRevenue && (
+        <Modal title="Total Revenue — Custom Dates" onClose={() => setShowTotalRevenue(false)} width={560}>
+          <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+            <Field label="From">
+              <Input type="date" value={totalRevFrom} onChange={(e) => setTotalRevFrom(e.target.value)} />
+            </Field>
+            <Field label="To">
+              <Input type="date" value={totalRevTo} onChange={(e) => setTotalRevTo(e.target.value)} />
+            </Field>
+          </div>
+
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, marginBottom: 16, padding: "14px 16px",
+            background: COLORS.tealDim, border: `1px solid ${COLORS.teal}55`, borderRadius: 10,
+          }}>
+            <IndianRupee size={22} color={COLORS.teal} />
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 800, fontFamily: FONT_MONO, color: COLORS.text }}>{fmtMoney(totalRevInRange)}</div>
+              <div style={{ fontSize: 11.5, color: COLORS.faint }}>
+                {totalRevFrom || totalRevTo
+                  ? `${totalRevFrom ? fmtDate(new Date(totalRevFrom + "T00:00:00").getTime()) : "the beginning"} → ${totalRevTo ? fmtDate(new Date(totalRevTo + "T00:00:00").getTime()) : "today"}`
+                  : "All time (no dates selected)"}
+                {" "}· {totalRevRangeInvoices.length} paid invoice{totalRevRangeInvoices.length === 1 ? "" : "s"}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4, color: COLORS.faint }}>
+            Contributing Payments
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+            {totalRevRangeInvoices.length === 0 && <div style={{ fontSize: 12.5, color: COLORS.faint }}>No paid invoices in this range.</div>}
+            {totalRevRangeInvoices.map((inv) => {
+              const PayIcon = PAY_ICON[inv.paymentMethod] || Banknote;
+              return (
+                <div key={inv.id} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "9px 11px", borderRadius: 8,
+                  background: COLORS.panel2, border: `1px solid ${COLORS.border}`, flexWrap: "wrap",
+                }}>
+                  <div style={{ flex: 1, minWidth: 160 }}>
+                    <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12 }}>{inv.id} <span style={{ color: COLORS.faint, fontWeight: 400, fontFamily: FONT_SANS }}>— {inv.customer}</span></div>
+                    <div style={{ fontSize: 10.5, color: COLORS.faint }}>{inv.jobId} · paid {fmtDate(inv.paidAt)}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: COLORS.muted }}>
+                    <PayIcon size={12} /> {inv.paymentMethod}
+                  </div>
+                  <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12.5, color: COLORS.teal }}>{fmtMoney(inv.total)}</div>
                 </div>
               );
             })}

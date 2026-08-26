@@ -8732,6 +8732,7 @@ function PrintInvoice({ invoice, job, onBack }) {
           </div>
         </div>
 
+
         <div style={{ marginTop: 26, fontSize: 10.5, color: "#888", textAlign: "center", borderTop: "1px dashed #ccc", paddingTop: 10 }}>
           Thank you for choosing AitechLab CRM. This is a system-generated invoice.
         </div>

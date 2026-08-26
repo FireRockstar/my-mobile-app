@@ -6,7 +6,9 @@ import {
   Banknote, CreditCard, Smartphone, Trash2, UserCircle2, ArrowLeft,
   PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin, Eye, Mic, Upload,
   Download, BarChart3, Calendar
-} from "lucide-react";
+} 
+  
+  from "lucide-react";
 
 import { useFirestoreArrayState, useFirestoreValueState, useFirestoreLogState } from "./services/firestoreService";
 

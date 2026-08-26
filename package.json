@@ -8,8 +8,7 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview"
-  }, 
-
+  },
   "dependencies": {
     "@capacitor/core": "^8.5.0",
     "@capacitor/filesystem": "^8.1.3",

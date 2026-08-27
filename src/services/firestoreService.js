@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  collection, doc, setDoc, addDoc,
+  collection, doc, setDoc, addDoc,deleteDoc,
   onSnapshot, query, orderBy, limit as fsLimit, writeBatch,
 } from "firebase/firestore";
 import { db } from "../firebase";
@@ -185,6 +185,18 @@ export function useFirestoreLogState(collectionName, orderField = "ts", limitN =
         allow read, write: if request.auth != null;
       }
     }
+
+
   }
   ------------------------------------------------------------------------
 */
+// Firestore-லிருந்து நேரடியாக ஒரு பதிவை நீக்க (Delete Record)
+export const deleteFirestoreRecord = async (collectionName, recordId) => {
+  try {
+    const docRef = doc(db, collectionName, String(recordId));
+    await deleteDoc(docRef);
+    console.log(`Document ${recordId} successfully deleted from ${collectionName}`);
+  } catch (error) {
+    console.error("Error deleting document from Firestore: ", error);
+  }
+};

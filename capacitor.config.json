@@ -1,0 +1,6 @@
+{
+  "appId": "com.aitechlab.crm",
+  "appName": "AitechLab CRM",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

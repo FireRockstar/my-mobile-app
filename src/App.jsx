@@ -6,10 +6,7 @@ import {
   Banknote, CreditCard, Smartphone, Trash2, UserCircle2, ArrowLeft,
   PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin, Eye, Mic, Upload,
   Download, BarChart3, Calendar
-} 
-  
-  from "lucide-react";
-
+} from "lucide-react";
 import { useFirestoreArrayState, useFirestoreValueState, useFirestoreLogState } from "./services/firestoreService";
 
 /* ---------------------------------------------------------------------- */
@@ -547,78 +544,11 @@ function PhotoUploadField({ label, value, onChange }) {
   );
 }
 
-const SEED_TECHS = [
-  { id: "T1", name: "Ravi Kumar", phone: "9876500011", specialty: "Panel & Backlight", type: "indoor" },
-  { id: "T2", name: "Suresh Babu", phone: "9876500022", specialty: "Power & SMPS", type: "indoor" },
-  { id: "T3", name: "Priya Ganesan", phone: "9876500033", specialty: "Mainboard & T-Con", type: "indoor" },
-  { id: "T4", name: "Manikandan S", phone: "9876500044", specialty: "Field Visits & On-site Diagnosis", type: "outdoor" },
-];
+const SEED_TECHS = []; // demo data removed — real records now come from Firestore
 
-const SEED_PARTS = [
-  { id: "P1", name: "LED Panel Strip (32\")", qty: 14, cost: 650, low: 5 },
-  { id: "P2", name: "LED Panel Strip (55\")", qty: 6, cost: 1450, low: 4 },
-  { id: "P3", name: "SMPS Power Board", qty: 9, cost: 980, low: 3 },
-  { id: "P4", name: "T-Con Board", qty: 4, cost: 1650, low: 3 },
-  { id: "P5", name: "Main Board (Universal)", qty: 3, cost: 2200, low: 2 },
-  { id: "P6", name: "IR Remote Sensor", qty: 22, cost: 120, low: 8 },
-  { id: "P7", name: "HDMI Port Board", qty: 11, cost: 380, low: 5 },
-  { id: "P8", name: "Speaker Set (Pair)", qty: 8, cost: 450, low: 4 },
-  { id: "P9", name: "Capacitor Repair Kit", qty: 17, cost: 90, low: 6 },
-  { id: "P10", name: "Ribbon Cable (LVDS)", qty: 2, cost: 260, low: 4 },
-];
+const SEED_PARTS = []; // demo data removed — real records now come from Firestore
 
-const SEED_JOBS = [
-  {
-    id: "JC-1001", customer: "Anitha Raman", phone: "9843211001", customerId: "CID-260810-014", location: "RS Puram, Coimbatore",
-    brand: "Samsung", model: "UA43T5350", issue: "No display, faint backlight visible",
-    accessories: "Remote, power cable", estimate: 2200, fault: "Backlight Fault", subFaults: ["LED Strip Burning / Damage"], remindersSent: 0,
-    intake: now - 5.5 * H, status: "received", assignedTech: null, partsUsed: [],
-    createdBy: "frontdesk",
-    updates: [{ ts: now - 5.5 * H, by: "Front Desk", note: "Job card created on intake.", status: "received" }],
-    invoiced: false,
-  },
-  {
-    id: "JC-1002", customer: "Mohammed Irfan", phone: "9843211002", customerId: "CID-260812-007", location: "Gandhipuram, Coimbatore",
-    brand: "LG", model: "43LM6360", issue: "Vertical lines across screen",
-    accessories: "None", estimate: 3200, fault: "Display Fault", subFaults: ["Pixel Shorting", "CKV / Gate Signal Shorting"], remindersSent: 0,
-    intake: now - 3.2 * H, status: "in_repair", assignedTech: "T1", partsUsed: [],
-    createdBy: "frontdesk",
-    updates: [
-      { ts: now - 3.2 * H, by: "Front Desk", note: "Job card created on intake.", status: "received" },
-      { ts: now - 3.0 * H, by: "Ravi Kumar", note: "Started diagnosis.", status: "under_diagnosis" },
-      { ts: now - 2.8 * H, by: "Ravi Kumar", note: "T-Con board fault identified.", status: "fault_identified" },
-      { ts: now - 2.6 * H, by: "Ravi Kumar", note: "Customer approved repair. Ordering part.", status: "in_repair" },
-    ],
-    invoiced: false,
-  },
-  {
-    id: "JC-1003", customer: "Deepa Selvam", phone: "9843211003", customerId: "CID-260805-002", location: "Peelamedu, Coimbatore",
-    brand: "Sony", model: "KLV-32R422", issue: "TV not powering on",
-    accessories: "Power cable only", estimate: 1400, fault: "SMPS / Power Supply Board", subFaults: ["Primary Switching Section Fault"], remindersSent: 0,
-    intake: now - 26 * H, status: "ready_for_delivery", assignedTech: "T2", partsUsed: [{ partId: "P3", qty: 1 }],
-    createdBy: "frontdesk",
-    updates: [
-      { ts: now - 26 * H, by: "Front Desk", note: "Job card created on intake.", status: "received" },
-      { ts: now - 20 * H, by: "Suresh Babu", note: "SMPS board dead. Replacement needed.", status: "in_repair" },
-      { ts: now - 4 * H, by: "Suresh Babu", note: "SMPS board replaced and tested OK.", status: "ready_for_delivery" },
-    ],
-    invoiced: false,
-  },
-  {
-    id: "JC-0998", customer: "Karthik Subramaniam", phone: "9843210998", customerId: "CID-260601-041", location: "Saibaba Colony, Coimbatore",
-    brand: "Mi", model: "L50M6-EI", issue: "Cracked panel, physical damage",
-    accessories: "Remote", estimate: 5200, fault: "Panel / Screen Damage", subFaults: [], remindersSent: 0,
-    intake: now - 50 * H, status: "delivered", assignedTech: "T3", partsUsed: [{ partId: "P2", qty: 1 }],
-    createdBy: "frontdesk",
-    updates: [
-      { ts: now - 50 * H, by: "Front Desk", note: "Job card created on intake.", status: "received" },
-      { ts: now - 46 * H, by: "Priya Ganesan", note: "Panel replacement confirmed with customer.", status: "in_repair" },
-      { ts: now - 30 * H, by: "Priya Ganesan", note: "Panel replaced, picture restored.", status: "ready_for_delivery" },
-      { ts: now - 6 * H, by: "Admin", note: "Delivered to customer.", status: "delivered" },
-    ],
-    invoiced: true,
-  },
-];
+const SEED_JOBS = []; // demo data removed — real records now come from Firestore
 
 /* ---------------------------------------------------------------------- */
 /*  CUSTOMERS (CID layer) — every inbound enquiry/call becomes a customer  */
@@ -627,38 +557,7 @@ const SEED_JOBS = [
 /*  the two records, mirroring the Customers/Jobs schema from the Android  */
 /*  Call Launcher architecture doc.                                        */
 /* ---------------------------------------------------------------------- */
-const SEED_CUSTOMERS = [
-  {
-    customerId: "CID-260810-014", name: "Anitha Raman", phone: "9843211001", location: "RS Puram, Coimbatore",
-    status: "Active Customer", source: "Inbound Call",
-    notes: [{ ts: now - 5.6 * H, by: "Front Desk", note: "Called about no-display issue on 43\" Samsung. Booked drop-off same day." }],
-    createdAt: now - 5.6 * H,
-  },
-  {
-    customerId: "CID-260812-007", name: "Mohammed Irfan", phone: "9843211002", location: "Gandhipuram, Coimbatore",
-    status: "Active Customer", source: "Inbound Call",
-    notes: [{ ts: now - 3.3 * H, by: "Front Desk", note: "Lines across screen, wants a quick turnaround before the weekend." }],
-    createdAt: now - 3.3 * H,
-  },
-  {
-    customerId: "CID-260805-002", name: "Deepa Selvam", phone: "9843211003", location: "Peelamedu, Coimbatore",
-    status: "Active Customer", source: "Walk-in",
-    notes: [],
-    createdAt: now - 26.2 * H,
-  },
-  {
-    customerId: "CID-260601-041", name: "Karthik Subramaniam", phone: "9843210998", location: "Saibaba Colony, Coimbatore",
-    status: "Active Customer", source: "Referral",
-    notes: [{ ts: now - 50.5 * H, by: "Front Desk", note: "Referred by Deepa Selvam. Cracked panel, wants OEM part only." }],
-    createdAt: now - 50.5 * H,
-  },
-  {
-    customerId: "CID-260815-023", name: "Lakshmi Narayanan", phone: "9876543210", location: "Ganapathy, Coimbatore",
-    status: "Enquiry / Lead", source: "Inbound Call",
-    notes: [{ ts: now - 20 * H, by: "Front Desk", note: "Asked about backlight repair cost for a 43\" Samsung. Quoted ₹2,000–2,500, said she'd call back — no drop-off yet." }],
-    createdAt: now - 20 * H,
-  },
-];
+const SEED_CUSTOMERS = []; // demo data removed — real records now come from Firestore
 
 /* ---------------------------------------------------------------------- */
 /*  ATTENDANCE — mandatory clock-in/out for Front Desk, Indoor, and        */
@@ -668,18 +567,7 @@ const SEED_CUSTOMERS = [
 /*  NOT continuous tracking (browsers can't do that in the background);    */
 /*  it's a location checkpoint at the start and end of the shift.          */
 /* ---------------------------------------------------------------------- */
-const SEED_ATTENDANCE = [
-  {
-    id: "ATT-1", userId: "T1", userName: "Ravi Kumar", role: "indoor_tech",
-    clockIn: now - 6 * H, clockInLocation: { lat: 11.0168, lng: 76.9558, accuracy: 18 },
-    clockOut: null, clockOutLocation: null,
-  },
-  {
-    id: "ATT-2", userId: "frontdesk", userName: "Front Desk", role: "frontdesk",
-    clockIn: now - 6.5 * H, clockInLocation: { lat: 11.0025, lng: 76.9615, accuracy: 12 },
-    clockOut: null, clockOutLocation: null,
-  },
-];
+const SEED_ATTENDANCE = []; // demo data removed — real records now come from Firestore
 
 /* Wraps the browser Geolocation API in a promise; resolves to null
    (rather than rejecting) if permission is denied or unavailable, so a
@@ -782,17 +670,7 @@ function parseVisitTimeToTimestamp(label) {
   return d.getTime();
 }
 
-const SEED_INVOICES = [
-  {
-    id: "INV-5001", jobId: "JC-0998", customer: "Karthik Subramaniam",
-    items: [
-      { desc: "LED Panel Strip (55\") x1", amount: 1450 },
-      { desc: "Service & Labor Charge", amount: 900 },
-    ],
-    total: 2350, paymentMethod: "GPay", paymentStatus: "Paid",
-    createdAt: now - 6 * H, paidAt: now - 6 * H,
-  },
-];
+const SEED_INVOICES = []; // demo data removed — real records now come from Firestore
 
 /* ---------------------------------------------------------------------- */
 /*  HELPERS                                                                */

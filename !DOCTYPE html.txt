@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LED TV Service Center in Coimbatore | Star Services</title>
+  <style>
+    :root { --dark:#0f172a; --blue:#1e3a8a; --orange:#f97316; --green:#25d366; --bg:#f8fafc; --white:#fff; }
+    * { box-sizing:border-box; margin:0; padding:0; font-family:system-ui,-apple-system,sans-serif; }
+    body { background:var(--bg); color:#1e293b; line-height:1.5; padding-bottom:70px; }
+    .container { max-width:1100px; margin:0 auto; padding:0 16px; }
+    .header { background:var(--white); position:sticky; top:0; z-index:100; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+    .nav { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; }
+    .logo { font-size:1.3rem; font-weight:700; color:var(--blue); }
+    .logo span { color:var(--orange); }
+    .btn { display:inline-flex; align-items:center; justify-content:center; padding:10px 18px; border-radius:6px; font-weight:600; text-decoration:none; border:none; cursor:pointer; font-size:0.9rem; }
+    .btn-call { background:var(--orange); color:var(--white); }
+    .btn-wa { background:var(--green); color:var(--white); }
+    .btn-full { width:100%; }
+    .hero { background:linear-gradient(135deg, var(--dark), var(--blue)); color:var(--white); padding:40px 0; }
+    .hero-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:center; }
+    .hero h1 { font-size:2rem; margin-bottom:12px; }
+    .hero p { color:#cbd5e1; margin-bottom:20px; font-size:1rem; }
+    .hero-btns { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .hero-img img { width:100%; border-radius:8px; height:auto; }
+    .section { padding:40px 0; }
+    .title { text-align:center; font-size:1.6rem; margin-bottom:8px; color:var(--dark); }
+    .subtitle { text-align:center; color:#64748b; margin-bottom:24px; font-size:0.95rem; }
+    .grid-3 { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:20px; }
+    .card { background:var(--white); border-radius:8px; border:1px solid #e2e8f0; overflow:hidden; padding:16px; }
+    .fault-card img { width:100%; height:160px; object-fit:cover; border-radius:6px; margin-bottom:12px; }
+    .fault-card h3 { font-size:1.1rem; margin-bottom:6px; }
+    .fault-card p { font-size:0.88rem; color:#64748b; margin-bottom:12px; }
+    .card-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .pills { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:10px; }
+    .pill { background:var(--white); padding:10px; border-radius:6px; text-align:center; border:1px solid #e2e8f0; font-weight:500; font-size:0.85rem; }
+    .form-box { background:var(--white); border:1px solid #e2e8f0; border-radius:8px; padding:24px; max-width:550px; margin:0 auto; }
+    .form-group { margin-bottom:12px; }
+    .form-group label { display:block; margin-bottom:4px; font-size:0.85rem; font-weight:600; }
+    .form-control { width:100%; padding:8px 12px; border:1px solid #cbd5e1; border-radius:6px; font-size:0.9rem; }
+    .faq { max-width:750px; margin:0 auto; display:flex; flex-direction:column; gap:12px; }
+    .faq-item { background:var(--white); padding:14px 18px; border-radius:6px; border:1px solid #e2e8f0; }
+    .faq-item h4 { font-size:0.95rem; margin-bottom:4px; }
+    .faq-item p { font-size:0.88rem; color:#64748b; }
+    .sticky-bar { position:fixed; bottom:0; left:0; right:0; background:var(--white); display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:8px 12px; box-shadow:0 -2px 10px rgba(0,0,0,0.1); z-index:1000; }
+    .footer { background:#020617; color:#94a3b8; padding:24px 0; text-align:center; font-size:0.8rem; }
+    @media(min-width:769px){ .sticky-bar{display:none;} body{padding-bottom:0;} }
+    @media(max-width:768px){ .hero-grid{grid-template-columns:1fr;} }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <header class="header">
+    <div class="container nav">
+      <div class="logo">STAR <span>SERVICES</span></div>
+      <div>
+        <a href="tel:+916380108690" class="btn btn-call">Call Now</a>
+        <a href="https://wa.me/916380108690?text=Vanakkam,%20en%20TV-il%20problem%20irukku." class="btn btn-wa">WhatsApp</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container hero-grid">
+      <div>
+        <h1>LED TV Service Center in Coimbatore</h1>
+        <p>Display, power, sound, picture, motherboard & Smart TV problems-ku reliable TV service. Coimbatore & nearby areas-la service-ku Call or WhatsApp pannunga.</p>
+        <div class="hero-btns">
+          <a href="tel:+916380108690" class="btn btn-call">Call Now</a>
+          <a href="https://wa.me/916380108690?text=Vanakkam,%20en%20TV-il%20problem%20irukku." class="btn btn-wa">WhatsApp Now</a>
+        </div>
+        <small style="color:#94a3b8">Ungal TV problem-ai share pannunga - engal team next steps explain pannuvanga.</small>
+      </div>
+      <div class="hero-img">
+        <img src="https://images.unsplash.com/photo-1593305841991-05c297ba4575?auto=format&fit=crop&w=600&q=80" alt="TV Repair Technician">
+      </div>
+    </div>
+  </section>
+
+  <!-- TV Faults -->
+  <section class="section">
+    <div class="container">
+      <h2 class="title">Common TV Faults</h2>
+      <p class="subtitle">Ungal TV symptom-ai select panni contact pannunga.</p>
+      <div class="grid-3">
+        <div class="card fault-card">
+          <img src="https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?auto=format&fit=crop&w=400&q=80" alt="Blank Screen">
+          <h3>1. Display / Blank Screen</h3>
+          <p>Sound varum, picture varaadhu. Likely Backlight LED fault. Final diagnosis requires inspection.</p>
+          <div class="card-actions">
+            <a href="tel:+916380108690" class="btn btn-call">Call</a>
+            <a href="https://wa.me/916380108690?text=Display%20Blank%20Issue" class="btn btn-wa">WhatsApp</a>
+          </div>
+        </div>
+        <div class="card fault-card">
+          <img src="https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=400&q=80" alt="No Power">
+          <h3>2. No Power Issue</h3>
+          <p>Standby red light eriyaadhu. Power supply board/SMPS issue. Final diagnosis requires inspection.</p>
+          <div class="card-actions">
+            <a href="tel:+916380108690" class="btn btn-call">Call</a>
+            <a href="https://wa.me/916380108690?text=No%20Power%20Issue" class="btn btn-wa">WhatsApp</a>
+          </div>
+        </div>
+        <div class="card fault-card">
+          <img src="https://images.unsplash.com/photo-1526738549149-8e07eca6c147?auto=format&fit=crop&w=400&q=80" alt="Screen Lines">
+          <h3>3. Lines on Screen</h3>
+          <p>Vertical or horizontal lines. Panel connection / T-Con board fault. Inspection required.</p>
+          <div class="card-actions">
+            <a href="tel:+916380108690" class="btn btn-call">Call</a>
+            <a href="https://wa.me/916380108690?text=Screen%20Lines%20Issue" class="btn btn-wa">WhatsApp</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Brands & Locations -->
+  <section class="section" style="background:var(--white)">
+    <div class="container">
+      <h2 class="title">Brands & Service Areas</h2>
+      <p class="subtitle">Coimbatore and nearby towns coverage</p>
+      <div class="pills">
+        <div class="pill">Samsung</div><div class="pill">LG</div><div class="pill">Sony</div>
+        <div class="pill">Mi / Xiaomi</div><div class="pill">OnePlus</div><div class="pill">TCL</div>
+        <div class="pill">Gandhipuram</div><div class="pill">RS Puram</div><div class="pill">Peelamedu</div>
+        <div class="pill">Saravanampatti</div><div class="pill">Mettupalayam</div><div class="pill">Pollachi</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Contact Form -->
+  <section class="section">
+    <div class="container">
+      <h2 class="title">Service Request</h2>
+      <div class="form-box">
+        <form onsubmit="event.preventDefault(); alert('Thank you! We will call you back.');">
+          <div class="form-group"><label>Name</label><input type="text" class="form-control" required></div>
+          <div class="form-group"><label>Phone</label><input type="tel" class="form-control" required></div>
+          <div class="form-group"><label>Area</label><input type="text" class="form-control" placeholder="e.g. Peelamedu" required></div>
+          <div class="form-group"><label>TV Brand & Problem</label><textarea class="form-control" rows="2"></textarea></div>
+          <button type="submit" class="btn btn-call btn-full">Submit Request</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section" style="background:var(--white)">
+    <div class="container">
+      <h2 class="title">FAQ</h2>
+      <div class="faq">
+        <div class="faq-item">
+          <h4>How much will repair cost?</h4>
+          <p>Cost depends on TV model, screen size, and fault after physical inspection.</p>
+        </div>
+        <div class="faq-item">
+          <h4>Do you service all areas in Coimbatore?</h4>
+          <p>Yes, we cover central city areas as well as nearby surrounding towns.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <p>&copy; 2026 Star Services LED TV Service Center, Coimbatore. Ph: +91 6380108690</p>
+    </div>
+  </footer>
+
+  <!-- Mobile Sticky Bar -->
+  <div class="sticky-bar">
+    <a href="tel:+916380108690" class="btn btn-call btn-full">Call Now</a>
+    <a href="https://wa.me/916380108690?text=Vanakkam,%20en%20TV-il%20problem%20irukku." class="btn btn-wa btn-full">WhatsApp Now</a>
+  </div>
+
+</body>
+</html>

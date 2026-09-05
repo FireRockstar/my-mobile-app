@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AitechLab CRM</string>
+    <string name="title_activity_main">AitechLab CRM</string>
+    <string name="package_name">com.aitechlab.crm</string>
+    <string name="custom_url_scheme">com.aitechlab.crm</string>
+</resources>

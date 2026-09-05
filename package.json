@@ -19,7 +19,8 @@
     "@capacitor/core": "^6.1.2",
     "@capacitor/android": "^6.1.2",
     "@capacitor/filesystem": "^6.0.1",
-    "@capacitor/share": "^6.0.2"
+    "@capacitor/share": "^6.0.2",
+    "@capacitor-firebase/authentication": "^6.1.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",

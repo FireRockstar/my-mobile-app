@@ -2,5 +2,11 @@
   "appId": "com.aitechlab.crm",
   "appName": "AitechLab CRM",
   "webDir": "dist",
-  "bundledWebRuntime": false
+  "bundledWebRuntime": false,
+  "plugins": {
+    "FirebaseAuthentication": {
+      "skipNativeAuth": false,
+      "providers": ["google.com"]
+    }
+  }
 }

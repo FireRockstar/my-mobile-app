@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "422945982803",
+    "project_id": "ai-tech-lab-crm",
+    "storage_bucket": "ai-tech-lab-crm.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:422945982803:android:500cfa176b9e2cb543f9a6",
+        "android_client_info": {
+          "package_name": "com.aitechlab.crm"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "422945982803-ta5imvqbf6ro05b8n4sek6vsna6o04q8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNScWRLWNyVJiWSKKjSUUwvIcltRk7FOI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "422945982803-ta5imvqbf6ro05b8n4sek6vsna6o04q8.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

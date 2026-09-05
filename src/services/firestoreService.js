@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  collection, doc, setDoc, addDoc,deleteDoc,
+  collection, doc, setDoc, addDoc,
   onSnapshot, query, orderBy, limit as fsLimit, writeBatch,
 } from "firebase/firestore";
 import { db } from "../firebase";
@@ -175,28 +175,34 @@ export function useFirestoreLogState(collectionName, orderField = "ts", limitN =
   setParts exactly like everything else, no separate import step needed.
   ------------------------------------------------------------------------
 
-  SECURITY RULES — paste into Firestore → Rules once you're past test mode:
+  SECURITY RULES — paste into Firestore → Rules once you're past test mode.
+  This version actually enforces the Google Sign-In + Admin-controlled
+  staff model from src/services/authService.js: only a signed-in Gmail
+  that's either OWNER_EMAIL or has an active `staff` doc can read/write
+  anything, and only Admins (owner or role: "admin") can write the staff
+  directory itself.
   ------------------------------------------------------------------------
 
   rules_version = '2';
   service cloud.firestore {
     match /databases/{database}/documents {
+      function isSignedIn() { return request.auth != null; }
+      function myEmail() { return request.auth.token.email; }
+      // Keep this in sync with OWNER_EMAIL in src/services/authService.js
+      function isOwner() { return isSignedIn() && myEmail() == "aitechlabledtvservice@gmail.com"; }
+      function staffDoc() { return get(/databases/$(database)/documents/staff/$(myEmail())); }
+      function isActiveStaff() { return isSignedIn() && exists(/databases/$(database)/documents/staff/$(myEmail())) && staffDoc().data.active == true; }
+      function isAdmin() { return isOwner() || (isActiveStaff() && staffDoc().data.role == "admin"); }
+      function hasAccess() { return isOwner() || isActiveStaff(); }
+
+      match /staff/{email} {
+        allow read: if hasAccess();
+        allow write: if isAdmin();
+      }
       match /{document=**} {
-        allow read, write: if request.auth != null;
+        allow read, write: if hasAccess();
       }
     }
-
-
   }
   ------------------------------------------------------------------------
 */
-// Firestore-லிருந்து நேரடியாக ஒரு பதிவை நீக்க (Delete Record)
-export const deleteFirestoreRecord = async (collectionName, recordId) => {
-  try {
-    const docRef = doc(db, collectionName, String(recordId));
-    await deleteDoc(docRef);
-    console.log(`Document ${recordId} successfully deleted from ${collectionName}`);
-  } catch (error) {
-    console.error("Error deleting document from Firestore: ", error);
-  }
-};

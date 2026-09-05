@@ -5,9 +5,13 @@ import {
   Clock, AlertTriangle, LogOut, Phone, ChevronRight, IndianRupee,
   Banknote, CreditCard, Smartphone, Trash2, UserCircle2, ArrowLeft,
   PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin, Eye, Mic, Upload,
-  Download, BarChart3, Calendar
+  Download, BarChart3, Calendar, ShieldCheck, UserPlus, Mail
 } from "lucide-react";
 import { useFirestoreArrayState, useFirestoreValueState, useFirestoreLogState } from "./services/firestoreService";
+import {
+  OWNER_EMAIL, signInWithGoogle, signOutUser, useAuthUser, useMyStaffRecord,
+  useStaffDirectory, upsertStaffDoc, setStaffActive, deleteStaffDoc,
+} from "./services/authService";
 
 /* ---------------------------------------------------------------------- */
 /*  smartPrint — window.print() works fine in the browser, but Android's  */
@@ -181,6 +185,14 @@ const DEFAULT_NOTIFICATION_SETTINGS = {
      nudging Admin/Front Desk to collect it back. Admin-editable snooze
      controls how soon it re-nags after "Remind Me Later". Defaults on. */
   standbyTv: { enabled: true, snoozeMin: 60 },
+  /* Location enforcement — when ON (default), Front Desk / Indoor /
+     Outdoor Technician logins are BLOCKED until phone location is turned
+     on, both at login and continuously while using the app (see the
+     LocationRequiredScreen gate in the root component). Admin can turn
+     this OFF here to let everyone into the app regardless of GPS status —
+     live tracking simply won't have anything to show for anyone while
+     it's off. */
+  locationEnforcement: { enabled: true },
   sounds: Object.fromEntries(Object.keys(NOTIFICATION_TYPE_META).map((k) => [k, { ...DEFAULT_NOTIFICATION_SOUND_CONFIG }])),
 };
 
@@ -1169,8 +1181,22 @@ function useBackClose(id, isOpen, close) {
 /*  ROOT APP                                                               */
 /* ---------------------------------------------------------------------- */
 export default function AitechLabCRM() {
-  const [role, setRole] = useState(null); // 'admin' | 'frontdesk' | 'technician'
-  const [activeTechId, setActiveTechId] = useState(null);
+  // --- AUTH: Google Sign-In + Admin-controlled staff directory ---------
+  // authUser: undefined while Firebase is still checking, null if signed
+  // out, else the Firebase user object.
+  // myStaff: undefined while loading, null if this Gmail has no access
+  // (not OWNER_EMAIL and no active `staff` doc), else { role, techId, ... }.
+  const authUser = useAuthUser();
+  const myStaff = useMyStaffRecord(authUser);
+  // role/activeTechId are now DERIVED from who's actually signed in —
+  // nobody can just click "Admin" from a menu anymore.
+  const role = myStaff && myStaff.active ? myStaff.role : null;
+  const activeTechId = myStaff?.techId || null;
+  // Front Desk / Technician logins require location to be ON, both right
+  // at login and continuously while the app is open — see the hook and
+  // the gate further down.
+  const [locationStatus, recheckLocation] = useGeolocationPermission();
+
   const [tab, setTab] = useState("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [newJobScreenOpenedAt, setNewJobScreenOpenedAt] = useState(null); // when the Add Job screen was opened — popups stay quiet (sound only) for 2 min after this, or until the screen is left
@@ -1210,7 +1236,17 @@ export default function AitechLabCRM() {
   const [techReminders, setTechReminders] = useState([]); // 1-hour "check this job" nudges for Indoor/Outdoor Technicians
   const [techReminderPopup, setTechReminderPopup] = useState(null); // most recent one, auto-opened as a blocking modal
   const [attendance, setAttendance] = useFirestoreArrayState("attendance", "id", "clockIn"); // clock-in/out log — see the ATTENDANCE section below
-  const [liveLocations, setLiveLocations] = useState({}); // { [techId]: {lat, lng, accuracy, ts} } — continuous GPS while a technician session is on shift, see the live-tracking effect below
+  // Stored as one Firestore doc per person (userId = technician id, or the
+  // literal string "frontdesk") so different people's phones can each
+  // update their own entry without racing each other. liveLocations below
+  // is the same { [userId]: {lat,lng,accuracy,ts} } shape the rest of the
+  // app already expects — just derived from the live array instead of
+  // being local-only state.
+  const [liveLocationsList, setLiveLocationsList] = useFirestoreArrayState("liveLocations", "userId");
+  const liveLocations = useMemo(
+    () => Object.fromEntries(liveLocationsList.map((l) => [l.userId, l])),
+    [liveLocationsList]
+  );
   const [clockingIn, setClockingIn] = useState(false); // spinner while requesting geolocation on Clock In/Out
   const [jobPromptCustomer, setJobPromptCustomer] = useState(null); // "Create Job ID now?" prompt after saving a new customer
   const [assigningOutdoorFor, setAssigningOutdoorFor] = useState(null); // customer record — "Assign Outdoor Technician" form is open for this customer
@@ -1349,8 +1385,7 @@ export default function AitechLabCRM() {
       if (!isTech) return;
       const cfg = loginWindowSettings[role] || DEFAULT_LOGIN_WINDOW_SETTINGS[role];
       if (!isWithinLoginWindow(cfg)) {
-        setRole(null);
-        setActiveTechId(null);
+        signOutUser();
         pushToast(`Logged out — ${role === "indoor_tech" ? "Indoor" : "Outdoor"} Technician access is only available between ${fmtHHMMDisplay(cfg.start)} and ${fmtHHMMDisplay(cfg.end)}.`, "alert");
       }
     }, 30 * 1000);
@@ -1891,34 +1926,42 @@ export default function AitechLabCRM() {
     });
   }, [jobs]);
 
-  /* LIVE GPS TRACKING — while an Indoor/Outdoor Technician is clocked in
-     and actively using the app on their own device, this continuously
-     watches their position and reports it into liveLocations so Admin's
-     Live Tracking view can show where they currently are, not just their
-     one-time clock-in snapshot. Stops the moment they clock out (or this
-     effect re-runs and finds them no longer on an open shift). Honest
-     limitation: this only reports for whichever technician's session is
-     actually open in a browser right now — there's no backend here to
-     receive a location from a technician's phone while Admin is looking
-     at a different session, so in this single-session demo, only one
-     technician's location can be "live" at a time. A real multi-device
-     rollout would have each phone reporting independently to a shared
-     backend, making every technician live simultaneously. */
+  /* LIVE GPS TRACKING — while Front Desk, or an Indoor/Outdoor Technician,
+     is clocked in and actively using the app on their own device, this
+     continuously watches their position and reports it into
+     liveLocations (a real Firestore collection — see above) so anyone
+     viewing Live Tracking sees where they currently are, not just their
+     one-time clock-in snapshot. Stops the moment they clock out. Because
+     every person's phone reports independently to the same Firestore
+     collection, everyone can be live simultaneously — this is real
+     multi-device tracking, not a single-session simulation. */
   useEffect(() => {
-    if ((role !== "indoor_tech" && role !== "outdoor_tech") || !activeTechId) return;
+    const trackableRole = role === "indoor_tech" || role === "outdoor_tech" || role === "frontdesk";
+    const myId = role === "frontdesk" ? "frontdesk" : activeTechId;
+    if (!trackableRole || !myId) return;
     if (typeof navigator === "undefined" || !navigator.geolocation) return;
-    const onShift = attendance.some((a) => a.userId === activeTechId && !a.clockOut && isSameDay(a.clockIn));
+    const onShift = attendance.some((a) => a.userId === myId && !a.clockOut && isSameDay(a.clockIn));
     if (!onShift) return;
+
+    // GPS fixes can arrive every few seconds — writing every one of them
+    // to Firestore would run up write costs for no real benefit. A
+    // position update every ~20s is plenty for "where is this person
+    // right now" purposes.
+    const MIN_UPDATE_INTERVAL_MS = 20 * 1000;
+    let lastSentAt = 0;
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        setLiveLocations((ll) => ({
-          ...ll,
-          [activeTechId]: {
-            lat: pos.coords.latitude, lng: pos.coords.longitude,
-            accuracy: Math.round(pos.coords.accuracy), ts: Date.now(),
-          },
-        }));
+        const now = Date.now();
+        if (now - lastSentAt < MIN_UPDATE_INTERVAL_MS) return;
+        lastSentAt = now;
+        setLiveLocationsList((list) => {
+          const others = list.filter((l) => l.userId !== myId);
+          return [...others, {
+            userId: myId, lat: pos.coords.latitude, lng: pos.coords.longitude,
+            accuracy: Math.round(pos.coords.accuracy), ts: now,
+          }];
+        });
       },
       () => { /* permission denied or unavailable — silently skip live tracking */ },
       { enableHighAccuracy: true, maximumAge: 30000, timeout: 20000 }
@@ -2708,16 +2751,39 @@ export default function AitechLabCRM() {
   if (printInvoice) return <PrintInvoice invoice={printInvoice} job={jobs.find((j) => j.id === printInvoice.jobId)} onBack={() => setPrintInvoice(null)} />;
 
   /* ------------------------------------------------------------------ */
-  /*  LOGIN / ROLE SELECT                                                 */
+  /*  LOGIN — Google Sign-In, gated by Admin-controlled staff records.    */
+  /*  Nobody can just click "Admin" from a menu anymore: access is        */
+  /*  decided entirely by OWNER_EMAIL + the `staff` Firestore collection  */
+  /*  (see src/services/authService.js and the "Manage Staff" screen).    */
   /* ------------------------------------------------------------------ */
-  if (!role) {
-    return (
-      <RoleSelect
-        technicians={technicians}
-        loginWindowSettings={loginWindowSettings}
-        onSelect={(r, techId) => { setRole(r); setActiveTechId(techId || null); setTab("dashboard"); }}
-      />
-    );
+  if (authUser === undefined || myStaff === undefined) {
+    return <AuthLoadingScreen />;
+  }
+  if (!authUser) {
+    return <GoogleSignInScreen />;
+  }
+  if (!myStaff || myStaff.active === false) {
+    return <AccessPendingScreen email={authUser.email} onSignOut={signOutUser} />;
+  }
+  if ((role === "indoor_tech" || role === "outdoor_tech") && !activeTechId) {
+    return <AccessPendingScreen email={authUser.email} onSignOut={signOutUser} reason="notlinked" />;
+  }
+  if (role === "indoor_tech" || role === "outdoor_tech") {
+    const winCfg = loginWindowSettings[role] || DEFAULT_LOGIN_WINDOW_SETTINGS[role];
+    if (!isWithinLoginWindow(winCfg)) {
+      return <LoginWindowLockedScreen role={role} winCfg={winCfg} onSignOut={signOutUser} />;
+    }
+  }
+  // Front Desk / Indoor / Outdoor Technician logins require phone
+  // location to be ON — checked right at login, and continuously
+  // re-checked (via the Permissions API's change event, plus a periodic
+  // fallback poll) for as long as they stay in the app. Admin is exempt —
+  // Admin isn't tracked. Admin can also turn this whole requirement off
+  // in Settings (notificationSettings.locationEnforcement).
+  const locationRequiredRole = role === "frontdesk" || role === "indoor_tech" || role === "outdoor_tech";
+  const locationEnforced = notificationSettings.locationEnforcement?.enabled !== false;
+  if (locationEnforced && locationRequiredRole && locationStatus !== "granted" && locationStatus !== "checking") {
+    return <LocationRequiredScreen status={locationStatus} onRetry={recheckLocation} onSignOut={signOutUser} />;
   }
 
   // Attendance identity for the logged-in user — Admin is exempt from
@@ -2734,7 +2800,7 @@ export default function AitechLabCRM() {
       <ClockInGate
         role={role} userName={attendanceUserName} clockingIn={clockingIn}
         onClockIn={() => clockIn(attendanceUserId, attendanceUserName, role)}
-        onSwitchLogin={() => { setRole(null); setActiveTechId(null); }}
+        onSwitchLogin={signOutUser}
       />
     );
   }
@@ -2753,6 +2819,7 @@ export default function AitechLabCRM() {
       { id: "livetracking", label: "Live Tracking", icon: MapPin },
       { id: "sms", label: "SMS Log", icon: MessageSquare },
       { id: "settings", label: "Settings", icon: Wrench },
+      { id: "staff", label: "Manage Staff", icon: ShieldCheck },
     ],
     frontdesk: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -2929,7 +2996,7 @@ export default function AitechLabCRM() {
               <Clock size={13} /> {clockingIn ? "Capturing location…" : "Clock Out"}
             </Btn>
           )}
-          <Btn variant="ghost" size="sm" style={{ width: "100%" }} onClick={() => { setRole(null); setActiveTechId(null); }}>
+          <Btn variant="ghost" size="sm" style={{ width: "100%" }} onClick={signOutUser}>
             <LogOut size={13} /> Switch role
           </Btn>
         </div>
@@ -3133,6 +3200,10 @@ export default function AitechLabCRM() {
               notificationSettings={notificationSettings} setNotificationSettings={setNotificationSettings}
               loginWindowSettings={loginWindowSettings} setLoginWindowSettings={setLoginWindowSettings}
             />
+          )}
+
+          {tab === "staff" && role === "admin" && (
+            <ManageStaffView technicians={technicians} myEmail={authUser?.email} />
           )}
         </div>
       </div>
@@ -3613,6 +3684,324 @@ export default function AitechLabCRM() {
 /* ---------------------------------------------------------------------- */
 /*  ROLE SELECT SCREEN                                                     */
 /* ---------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------- */
+/*  AUTH SCREENS — shared gradient shell + the four states a signed-out    */
+/*  or not-yet-approved person can land on. See src/services/authService.  */
+/*  js for how OWNER_EMAIL + the `staff` collection decide access.         */
+/* ---------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------- */
+/*  LOCATION GATE — Front Desk / Indoor / Outdoor Technician logins        */
+/*  require phone location to be ON, both at login and continuously       */
+/*  while using the app.                                                  */
+/* ---------------------------------------------------------------------- */
+function useGeolocationPermission() {
+  // "checking" | "granted" | "denied" | "prompt" | "unsupported"
+  const [status, setStatus] = useState("checking");
+  const [pulse, setPulse] = useState(0); // bump to force a manual recheck (the Retry button)
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setStatus("unsupported");
+      return;
+    }
+    let cancelled = false;
+    let permObj = null;
+
+    // Calling this is what actually makes the OS/browser permission
+    // dialog pop up automatically when permission hasn't been decided
+    // yet ("prompt") — no separate "please allow" button needed for the
+    // very first ask.
+    function requestPosition() {
+      navigator.geolocation.getCurrentPosition(
+        () => { if (!cancelled) setStatus("granted"); },
+        (err) => { if (!cancelled) setStatus(err.code === 1 ? "denied" : "prompt"); },
+        { maximumAge: 60000, timeout: 10000 }
+      );
+    }
+
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: "geolocation" }).then((result) => {
+        if (cancelled) return;
+        permObj = result;
+        setStatus(result.state);
+        // Live-updates the moment the person flips location on/off in
+        // their phone's system settings, without needing to reopen the app.
+        result.onchange = () => setStatus(result.state);
+        if (result.state !== "denied") requestPosition();
+      }).catch(requestPosition);
+    } else {
+      // Permissions API unavailable (older Safari/iOS, some WebViews) —
+      // requesting a position directly still triggers the native prompt.
+      requestPosition();
+    }
+
+    // Extra safety net for browsers where the Permissions API's onchange
+    // event doesn't fire reliably — re-checks every 30s regardless.
+    const pollId = setInterval(() => { if (!cancelled) requestPosition(); }, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(pollId);
+      if (permObj) permObj.onchange = null;
+    };
+  }, [pulse]);
+
+  return [status, () => setPulse((p) => p + 1)];
+}
+
+function LocationRequiredScreen({ status, onRetry, onSignOut }) {
+  const isDenied = status === "denied";
+  return (
+    <AuthShell>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, textAlign: "left", padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.85)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.7)", marginBottom: 14 }}>
+        <MapPin size={18} color="#D97706" style={{ flexShrink: 0, marginTop: 1 }} />
+        <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+          {isDenied
+            ? "Location access is turned off for this app. Front Desk and Technician logins require location to stay on the whole time you're using the app."
+            : "This app needs your location to continue — allow location access when your phone asks."}
+        </div>
+      </div>
+      {isDenied && (
+        <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.9)", textShadow: "0 1px 8px rgba(80,20,120,0.3)", lineHeight: 1.6, marginBottom: 16, textAlign: "left" }}>
+          Turn it back on: Phone Settings → Apps → AitechLab CRM → Permissions → Location → Allow. Then tap Retry below.
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <Btn onClick={onRetry}><RefreshCw size={14} /> Retry</Btn>
+        <Btn variant="outline" onClick={onSignOut} style={{ width: "100%" }}><LogOut size={14} /> Sign out</Btn>
+      </div>
+    </AuthShell>
+  );
+}
+
+function AuthShell({ children }) {
+  return (
+    <div style={{
+      fontFamily: FONT_SANS,
+      background: `
+        radial-gradient(circle at 12% 12%, rgba(255,255,255,0.55), transparent 38%),
+        radial-gradient(circle at 88% 22%, rgba(147,197,253,0.55), transparent 45%),
+        radial-gradient(circle at 25% 88%, rgba(244,114,182,0.5), transparent 50%),
+        radial-gradient(circle at 78% 82%, rgba(196,181,253,0.55), transparent 45%),
+        linear-gradient(135deg, #a78bfa 0%, #f0abfc 30%, #93c5fd 65%, #f9a8d4 100%)
+      `,
+      color: "#2B1A4A", minHeight: 620, display: "flex", alignItems: "center", justifyContent: "center",
+      borderRadius: 14, border: "1px solid rgba(255,255,255,0.5)", padding: 24,
+    }}>
+      <div style={{ width: "100%", maxWidth: 420, textAlign: "center" }}>
+        <div style={{ width: 54, height: 54, borderRadius: 14, background: COLORS.amber, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", boxShadow: "0 8px 20px rgba(240,166,58,0.4)" }}>
+          <Tv size={28} color="#1A1300" />
+        </div>
+        <div style={{ fontWeight: 800, fontSize: 21, color: "#fff", textShadow: "0 2px 14px rgba(80,20,120,0.35)" }}>AitechLab CRM</div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.9)", fontFamily: FONT_MONO, letterSpacing: 1, marginTop: 2, marginBottom: 28, textShadow: "0 1px 8px rgba(80,20,120,0.3)" }}>LED TV REPAIR SERVICE CENTER</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AuthLoadingScreen() {
+  return (
+    <AuthShell>
+      <div style={{ color: "#fff", fontSize: 13, textShadow: "0 1px 8px rgba(80,20,120,0.3)" }}>Checking your sign-in…</div>
+    </AuthShell>
+  );
+}
+
+function GoogleSignInScreen() {
+  const [signingIn, setSigningIn] = useState(false);
+  const [error, setError] = useState(null);
+  async function handleClick() {
+    setSigningIn(true);
+    setError(null);
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      console.error("Google sign-in failed:", err);
+      setError("Sign-in didn't go through — please try again.");
+    } finally {
+      setSigningIn(false);
+    }
+  }
+  return (
+    <AuthShell>
+      <button
+        onClick={handleClick} disabled={signingIn}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%",
+          padding: "13px 16px", borderRadius: 10, background: "#fff", border: "1px solid rgba(255,255,255,0.7)",
+          cursor: signingIn ? "default" : "pointer", fontWeight: 700, fontSize: 14, color: "#2B1A4A",
+          boxShadow: "0 8px 22px rgba(80,20,120,0.18)", opacity: signingIn ? 0.7 : 1,
+        }}
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84c-.21 1.13-.84 2.09-1.8 2.73v2.27h2.91c1.7-1.57 2.69-3.87 2.69-6.64z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.91-2.27c-.81.54-1.84.86-3.05.86-2.35 0-4.34-1.58-5.05-3.71H.96v2.33C2.44 15.98 5.48 18 9 18z"/><path fill="#FBBC05" d="M3.95 10.7c-.18-.54-.28-1.11-.28-1.7s.1-1.16.28-1.7V4.97H.96A8.99 8.99 0 000 9c0 1.45.35 2.83.96 4.03l2.99-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0 5.48 0 2.44 2.02.96 4.97l2.99 2.33C4.66 5.16 6.65 3.58 9 3.58z"/></svg>
+        {signingIn ? "Signing in…" : "Sign in with Google"}
+      </button>
+      {error && <div style={{ marginTop: 10, fontSize: 11.5, color: "#fff", textShadow: "0 1px 8px rgba(80,20,120,0.3)" }}>{error}</div>}
+      <div style={{ marginTop: 18, fontSize: 11.5, color: "rgba(255,255,255,0.85)", textShadow: "0 1px 8px rgba(80,20,120,0.3)", lineHeight: 1.5 }}>
+        Access is controlled by Admin — sign in with the Gmail account Admin has on file for you.
+      </div>
+    </AuthShell>
+  );
+}
+
+function AccessPendingScreen({ email, onSignOut, reason }) {
+  return (
+    <AuthShell>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, textAlign: "left", padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.85)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.7)", marginBottom: 16 }}>
+        <AlertTriangle size={18} color="#D97706" style={{ flexShrink: 0, marginTop: 1 }} />
+        <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+          {reason === "notlinked" ? (
+            <>Your account (<strong>{email}</strong>) is approved but isn't linked to a technician profile yet. Ask Admin to finish setting up your access in Manage Staff.</>
+          ) : (
+            <>Signed in as <strong>{email}</strong>, but this account doesn't have access yet. Ask your Admin to add you in Manage Staff — access starts working immediately once they do, no need to sign in again.</>
+          )}
+        </div>
+      </div>
+      <Btn variant="outline" onClick={onSignOut} style={{ width: "100%" }}>
+        <LogOut size={14} /> Sign in with a different account
+      </Btn>
+    </AuthShell>
+  );
+}
+
+function LoginWindowLockedScreen({ role, winCfg, onSignOut }) {
+  return (
+    <AuthShell>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, textAlign: "left", padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.85)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.7)", marginBottom: 16 }}>
+        <Clock size={18} color="#D97706" style={{ flexShrink: 0, marginTop: 1 }} />
+        <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+          {role === "indoor_tech" ? "Indoor" : "Outdoor"} Technician access is only available between <strong>{fmtHHMMDisplay(winCfg.start)}</strong> and <strong>{fmtHHMMDisplay(winCfg.end)}</strong> daily.
+        </div>
+      </div>
+      <Btn variant="outline" onClick={onSignOut} style={{ width: "100%" }}>
+        <LogOut size={14} /> Sign out
+      </Btn>
+    </AuthShell>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/*  MANAGE STAFF (Admin) — the whole "front desk / technicians controlled  */
+/*  by admin" story lives here: add a Gmail address, assign a role (and    */
+/*  for tech roles, link it to a technician profile), toggle access on or  */
+/*  off, or remove someone. Nobody else can reach this screen (role check  */
+/*  happens where it's routed to, and again Firestore-side via Rules).     */
+/* ---------------------------------------------------------------------- */
+function ManageStaffView({ technicians, myEmail }) {
+  const staff = useStaffDirectory();
+  const [adding, setAdding] = useState(false);
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRoleField] = useState("frontdesk");
+  const [techId, setTechId] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const roleLabels = { admin: "Admin", frontdesk: "Front Desk", indoor_tech: "Indoor Technician", outdoor_tech: "Outdoor Technician" };
+  const needsTech = role === "indoor_tech" || role === "outdoor_tech";
+  const eligibleTechs = technicians.filter((t) => t.type === (role === "indoor_tech" ? "indoor" : "outdoor"));
+  const valid = email.trim().includes("@") && (!needsTech || techId);
+
+  async function handleAdd() {
+    setSaving(true);
+    try {
+      await upsertStaffDoc(email.trim().toLowerCase(), { name: name.trim(), role, techId: needsTech ? techId : null, active: true });
+      setAdding(false);
+      setEmail(""); setName(""); setRoleField("frontdesk"); setTechId("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontWeight: 700, fontSize: 14.5 }}>Manage Staff</div>
+        <Btn size="sm" onClick={() => setAdding(true)}><UserPlus size={13} /> Add Staff</Btn>
+      </div>
+      <div style={{ fontSize: 12, color: COLORS.faint, marginBottom: 16, lineHeight: 1.5 }}>
+        Everyone here signs in with their own Gmail — add their address, assign a role, and (for technicians) link it to their profile. Turning access off takes effect immediately, no re-login needed on their end.
+      </div>
+
+      <Panel style={{ padding: 13, marginBottom: 16, borderColor: `${COLORS.teal}55` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+          <ShieldCheck size={15} color={COLORS.teal} />
+          <span><strong>{myEmail}</strong> — Owner Admin (always has access, set in authService.js)</span>
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {staff.length === 0 && <div style={{ fontSize: 12.5, color: COLORS.faint }}>No staff added yet — add Front Desk and technician Gmail accounts above.</div>}
+        {staff.map((s) => (
+          <Panel key={s.email} style={{ padding: 13 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Mail size={13} color={COLORS.faint} />
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{s.email}</span>
+                  {s.active === false && <span style={{ fontSize: 10.5, color: COLORS.red, fontFamily: FONT_MONO }}>disabled</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 2 }}>
+                  {s.name ? `${s.name} · ` : ""}{roleLabels[s.role] || s.role}
+                  {s.techId ? ` — linked to ${technicians.find((t) => t.id === s.techId)?.name || s.techId}` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 7 }}>
+                <Btn size="sm" variant="outline" onClick={() => setStaffActive(s.email, s.active === false)}>
+                  {s.active === false ? "Enable" : "Disable"}
+                </Btn>
+                <Btn size="sm" variant="danger" onClick={() => deleteStaffDoc(s.email)}><Trash2 size={12} /></Btn>
+              </div>
+            </div>
+          </Panel>
+        ))}
+      </div>
+
+      {adding && (
+        <Modal title="Add Staff" onClose={() => setAdding(false)} width={440}>
+          <Field label="Gmail Address">
+            <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@gmail.com" />
+          </Field>
+          <div style={{ height: 12 }} />
+          <Field label="Name (optional)">
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="For your own reference" />
+          </Field>
+          <div style={{ height: 12 }} />
+          <Field label="Role">
+            <Select value={role} onChange={(e) => { setRoleField(e.target.value); setTechId(""); }}>
+              <option value="frontdesk">Front Desk</option>
+              <option value="indoor_tech">Indoor Technician</option>
+              <option value="outdoor_tech">Outdoor Technician</option>
+              <option value="admin">Admin</option>
+            </Select>
+          </Field>
+          {needsTech && (
+            <>
+              <div style={{ height: 12 }} />
+              <Field label="Linked Technician Profile">
+                <Select value={techId} onChange={(e) => setTechId(e.target.value)}>
+                  <option value="">Select…</option>
+                  {eligibleTechs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </Select>
+              </Field>
+              {eligibleTechs.length === 0 && (
+                <div style={{ fontSize: 11.5, color: COLORS.amber, marginTop: 6 }}>
+                  No {role === "indoor_tech" ? "indoor" : "outdoor"} technicians set up yet — add one from the Technicians tab first.
+                </div>
+              )}
+            </>
+          )}
+          <div style={{ marginTop: 16 }}>
+            <Btn disabled={!valid || saving} onClick={handleAdd}>
+              <UserPlus size={14} /> {saving ? "Adding…" : "Add Staff"}
+            </Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function RoleSelect({ technicians, onSelect, loginWindowSettings = DEFAULT_LOGIN_WINDOW_SETTINGS }) {
   const [pickingRole, setPickingRole] = useState(null); // null | "indoor_tech" | "outdoor_tech"
   useBackClose("pickingRole", !!pickingRole, () => setPickingRole(null));
@@ -5035,7 +5424,7 @@ function Dashboard({ jobs, invoices, technicians, parts, revenueToday, outstandi
         <StatCard icon={ClipboardList} label="Pending Orders" value={pendingOrders.length} sub="Tap to view the list" accent={COLORS.amber} onClick={() => setShowPendingList(true)} />
         <StatCard icon={IndianRupee} label="Revenue Today" value={fmtMoney(revenueToday)} sub="Paid invoices, today" accent={COLORS.teal} />
         <StatCard icon={AlertTriangle} label="Outstanding Dues" value={fmtMoney(outstandingDues)} sub="Unpaid invoices" accent={COLORS.red} />
-        <StatCard icon={MapPin} label="Technician Locations" value={Object.keys(liveLocations || {}).length} sub="Tap to view live map" accent={COLORS.blue} onClick={onViewLiveTracking} />
+        <StatCard icon={MapPin} label="Live Locations" value={Object.keys(liveLocations || {}).length} sub="Tap to view live map" accent={COLORS.blue} onClick={onViewLiveTracking} />
       </div>
 
       {/* Nothing about total revenue is ever displayed here — the figure only
@@ -5266,7 +5655,7 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
         <StatCard icon={Clock} label="Pending Today" value={pendingToday.length} sub="Intake received today" accent={COLORS.blue} />
         <StatCard icon={Users} label="Unassigned" value={unassigned.length} sub="Waiting on a technician" accent={COLORS.red} />
         <StatCard icon={CheckCircle2} label="Completed Today" value={completedToday.length} sub="Ready for billing / pickup" accent={COLORS.teal} />
-        <StatCard icon={MapPin} label="Technician Locations" value={Object.keys(liveLocations || {}).length} sub="Tap to view live map" accent={COLORS.blue} onClick={onViewLiveTracking} />
+        <StatCard icon={MapPin} label="Live Locations" value={Object.keys(liveLocations || {}).length} sub="Tap to view live map" accent={COLORS.blue} onClick={onViewLiveTracking} />
       </div>
 
       {/* ---- Pending Orders (on top) ---- */}
@@ -8018,6 +8407,9 @@ function NotificationSettingsPanel({ notificationSettings, setNotificationSettin
   const patchStandbyTv = (patch) => {
     setNotificationSettings((s) => ({ ...s, standbyTv: { ...s.standbyTv, ...patch } }));
   };
+  const patchLocationEnforcement = (patch) => {
+    setNotificationSettings((s) => ({ ...s, locationEnforcement: { ...s.locationEnforcement, ...patch } }));
+  };
 
   const delayFieldsForRole = {
     admin: [
@@ -8230,6 +8622,37 @@ function NotificationSettingsPanel({ notificationSettings, setNotificationSettin
         )}
       </div>
 
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Location Requirement</div>
+      <div style={{ fontSize: 12, color: COLORS.faint, marginBottom: 12, lineHeight: 1.5 }}>
+        When on, Front Desk / Indoor / Outdoor Technician logins are blocked unless phone location (GPS) is turned on — both at login and continuously while using the app. Turn this off to let everyone in regardless of GPS status; Live Tracking simply won't have a live position to show for them while it's off.
+      </div>
+      <div style={{
+        padding: "12px 14px", borderRadius: 9, background: COLORS.panel2, border: `1px solid ${COLORS.border}`, marginBottom: 22,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>Require Location to Use the App</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn
+              size="sm" variant={notificationSettings.locationEnforcement?.enabled !== false ? "teal" : "outline"}
+              onClick={() => patchLocationEnforcement({ enabled: true })}
+            >
+              On
+            </Btn>
+            <Btn
+              size="sm" variant={notificationSettings.locationEnforcement?.enabled === false ? "danger" : "outline"}
+              onClick={() => patchLocationEnforcement({ enabled: false })}
+            >
+              Off
+            </Btn>
+          </div>
+        </div>
+        <div style={{ fontSize: 11.5, color: COLORS.faint, marginTop: 8 }}>
+          {notificationSettings.locationEnforcement?.enabled !== false
+            ? "On — Front Desk/Technicians can't get past login (or stay in the app) with location turned off."
+            : "Off — anyone can use the app without turning on GPS. Live location tracking will be empty for users who keep it off."}
+        </div>
+      </div>
+
       <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Notification Sounds</div>
       <div style={{ fontSize: 12, color: COLORS.faint, marginBottom: 12, lineHeight: 1.5 }}>
         Each notification type below has its own sound — pick a preset or upload an audio file (MP3, WAV, up to {(MAX_CUSTOM_SOUND_BYTES / 1024 / 1024).toFixed(1)} MB) for any of them.
@@ -8387,44 +8810,52 @@ function AttendanceView({ attendance, tick }) {
 function LiveTrackingView({ technicians, attendance, liveLocations, tick }) {
   const LIVE_FRESH_MS = 2 * 60 * 1000; // treat a fix as "live" for 2 minutes after it arrives
 
-  const rows = technicians.map((t) => {
-    const openShift = attendance.find((a) => a.userId === t.id && !a.clockOut && isSameDay(a.clockIn));
-    const live = liveLocations[t.id];
+  // Front Desk is tracked under one shared "frontdesk" id (same identity
+  // attendance/clock-in already uses for that role) alongside each
+  // individual technician.
+  const people = [
+    { id: "frontdesk", name: "Front Desk", roleLabel: "Front Desk" },
+    ...technicians.map((t) => ({ id: t.id, name: t.name, roleLabel: t.type === "outdoor" ? "Outdoor" : "Indoor", specialty: t.specialty })),
+  ];
+
+  const rows = people.map((p) => {
+    const openShift = attendance.find((a) => a.userId === p.id && !a.clockOut && isSameDay(a.clockIn));
+    const live = liveLocations[p.id];
     const isLiveFresh = !!(live && Date.now() - live.ts < LIVE_FRESH_MS);
     const lastAttendance = [...attendance]
-      .filter((a) => a.userId === t.id && a.clockInLocation)
+      .filter((a) => a.userId === p.id && a.clockInLocation)
       .sort((a, b) => b.clockIn - a.clockIn)[0];
     const location = isLiveFresh ? live : (lastAttendance ? lastAttendance.clockInLocation : null);
-    return { tech: t, onShift: !!openShift, isLiveFresh, location, live, lastAttendance };
+    return { person: p, onShift: !!openShift, isLiveFresh, location, live, lastAttendance };
   });
 
   const liveCount = rows.filter((r) => r.isLiveFresh).length;
 
   return (
     <div>
-      <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 4 }}>Live Technician Tracking</div>
+      <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 4 }}>Live Tracking</div>
       <div style={{ fontSize: 12, color: COLORS.faint, marginBottom: 12 }}>
-        {liveCount} of {technicians.length} technician{technicians.length === 1 ? "" : "s"} reporting a live position right now.
+        {liveCount} of {people.length} reporting a live position right now.
       </div>
       <div style={{
         fontSize: 11.5, color: COLORS.faint, background: COLORS.panel2, border: `1px solid ${COLORS.border}`,
         borderRadius: 8, padding: "10px 12px", marginBottom: 16, lineHeight: 1.5,
       }}>
-        A technician shows "Live" only while their own phone/session is actively open in the app with location permission granted — this demo runs as a single browser session, so at most one technician can be live here at a time. On a real multi-device rollout, every technician's phone reports independently, so all of them can be live simultaneously. Anyone not currently live falls back to their last known location from clock-in.
+        A person shows "Live" while they're clocked in with the app open and location permission granted on their own phone — every device reports independently, so everyone can be live at the same time. Anyone not currently live falls back to their last known location from clock-in. Front Desk is tracked as one shared identity, same as clock-in.
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {rows.map(({ tech, onShift, isLiveFresh, location, live, lastAttendance }) => {
+        {rows.map(({ person, onShift, isLiveFresh, location, live, lastAttendance }) => {
           const link = mapsLink(location);
           return (
-            <Panel key={tech.id} style={{ padding: 14, display: "flex", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+            <Panel key={person.id} style={{ padding: 14, display: "flex", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
               <div style={{ width: 34, height: 34, borderRadius: 999, background: COLORS.tealDim, display: "flex", alignItems: "center", justifyContent: "center", color: COLORS.teal, fontWeight: 700, fontSize: 12.5, flexShrink: 0 }}>
-                {tech.name.split(" ").map((x) => x[0]).join("")}
+                {person.name.split(" ").map((x) => x[0]).join("")}
               </div>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 700, fontSize: 13 }}>{tech.name}</span>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{person.name}</span>
                   <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: COLORS.muted, background: COLORS.panel2, padding: "2px 7px", borderRadius: 999 }}>
-                    {tech.type === "outdoor" ? "Outdoor" : "Indoor"}
+                    {person.roleLabel}
                   </span>
                   {onShift ? (
                     <span style={{ fontSize: 10, fontWeight: 700, color: COLORS.teal, background: COLORS.tealDim, padding: "2px 7px", borderRadius: 999 }}>
@@ -8441,9 +8872,11 @@ function LiveTrackingView({ technicians, attendance, liveLocations, tick }) {
                     </span>
                   )}
                 </div>
-                <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 6 }}>
-                  {tech.specialty}
-                </div>
+                {person.specialty && (
+                  <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 6 }}>
+                    {person.specialty}
+                  </div>
+                )}
                 <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 4 }}>
                   {location ? (
                     <>
@@ -8463,7 +8896,6 @@ function LiveTrackingView({ technicians, attendance, liveLocations, tick }) {
             </Panel>
           );
         })}
-        {technicians.length === 0 && <div style={{ color: COLORS.faint, fontSize: 12.5 }}>No technicians on file yet.</div>}
       </div>
     </div>
   );

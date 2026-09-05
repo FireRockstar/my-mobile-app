@@ -916,29 +916,18 @@ const nextInvId = () => `INV-${invCounter++}`;
 /*  JID-260816-8000. Mirrors the next_daily_id() Postgres function from    */
 /*  the Android Call Launcher architecture doc, so the same ID scheme      */
 /*  works whether a record originates from the phone app or this web app. */
-/*  Job numbers start at 8000 each day; CID numbers start at 001.          */
+/*  The STARTING number for each prefix is Admin-editable (Settings →      */
+/*  Job/Customer ID Numbering) — see idConfig/nextDailyId inside the root  */
+/*  component below, which replaces what used to be a fixed, in-memory-    */
+/*  only counter here.                                                    */
 /* ---------------------------------------------------------------------- */
-const dailyIdCounters = {};
-const DAILY_ID_CONFIG = {
-  JID: { start: 8000, pad: 0 },
-  JOD: { start: 8000, pad: 0 },
-  CID: { start: 1, pad: 3 },
-  COD: { start: 1, pad: 3 },
-};
+const DEFAULT_ID_CONFIG = { jidStart: 8000, jodStart: 8000, cidStart: 1, codStart: 1 };
 function todayYYYYMMDD() {
   const d = new Date();
   const yy = String(d.getFullYear()).slice(-2);
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yy}${mm}${dd}`;
-}
-function nextDailyId(prefix) {
-  const cfg = DAILY_ID_CONFIG[prefix] || { start: 1, pad: 3 };
-  const key = `${prefix}-${todayYYYYMMDD()}`;
-  if (dailyIdCounters[key] === undefined) dailyIdCounters[key] = cfg.start - 1;
-  dailyIdCounters[key] += 1;
-  const numStr = cfg.pad ? String(dailyIdCounters[key]).padStart(cfg.pad, "0") : String(dailyIdCounters[key]);
-  return `${key}-${numStr}`;
 }
 
 /* Reads the live, Admin-editable label-print delay (in ms) for a given
@@ -1266,6 +1255,8 @@ export default function AitechLabCRM() {
   const [smsDispatchMode, setSmsDispatchMode] = useFirestoreValueState("settings", "smsDispatch", "automatic"); // Admin toggle: "automatic" | "manual"
   const [notificationSettings, setNotificationSettings] = useFirestoreValueState("settings", "notifications", DEFAULT_NOTIFICATION_SETTINGS); // Admin toggle: per-role on/off, reminder delay, and shared sound preset
   const [loginWindowSettings, setLoginWindowSettings] = useFirestoreValueState("settings", "loginWindow", DEFAULT_LOGIN_WINDOW_SETTINGS); // Admin toggle: daily login start/end time, per technician role
+  const [idConfig, setIdConfig] = useFirestoreValueState("settings", "idConfig", DEFAULT_ID_CONFIG); // Admin-set starting numbers for Job IDs (JID/JOD) and Customer IDs (CID/COD)
+  const [idCounters, setIdCounters] = useFirestoreValueState("settings", "idCounters", {}); // { "JID-260905": 8004, ... } — persisted so numbering survives reloads and stays consistent across every device
   const [extraTasks, setExtraTasks] = useFirestoreArrayState("extraTasks", "id", "createdAt"); // ad-hoc work Admin/Front Desk hands a technician outside of job cards — e.g. "restock parts bin", "clean bench 2"
 
   const toastTimer = useRef(null);
@@ -1809,6 +1800,34 @@ export default function AitechLabCRM() {
   /* ---------------------------------------------------------------- */
   const standbyLoansRef = useRef(standbyLoans);
   useEffect(() => { standbyLoansRef.current = standbyLoans; }, [standbyLoans]);
+
+  /* ---------------------------------------------------------------- */
+  /*  JOB / CUSTOMER ID NUMBERING — generates the next CID/JID/COD/JOD    */
+  /*  for the day, starting from whatever Admin has configured in        */
+  /*  Settings → Job/Customer ID Numbering (idConfig), persisted via      */
+  /*  idCounters so the sequence survives reloads and stays consistent    */
+  /*  across every device (not just whichever browser tab created the    */
+  /*  last one). idCountersRef mirrors the same "read latest synchronous  */
+  /*  value from a ref, write optimistically" pattern used everywhere     */
+  /*  else in this file (jobsRef, standbyLoansRef, etc).                  */
+  /* ---------------------------------------------------------------- */
+  const idCountersRef = useRef(idCounters);
+  useEffect(() => { idCountersRef.current = idCounters; }, [idCounters]);
+
+  function nextDailyId(prefix) {
+    const startFor = { JID: idConfig.jidStart, JOD: idConfig.jodStart, CID: idConfig.cidStart, COD: idConfig.codStart };
+    const padFor = { JID: 0, JOD: 0, CID: 3, COD: 3 };
+    const startVal = startFor[prefix] ?? 1;
+    const pad = padFor[prefix] ?? 0;
+    const key = `${prefix}-${todayYYYYMMDD()}`;
+    const current = idCountersRef.current[key];
+    const next = current === undefined ? startVal : current + 1;
+    const updated = { ...idCountersRef.current, [key]: next };
+    idCountersRef.current = updated; // so back-to-back calls in the same tick (e.g. two quick "preview next id" renders) don't hand out the same number
+    setIdCounters(updated);
+    const numStr = pad ? String(next).padStart(pad, "0") : String(next);
+    return `${key}-${numStr}`;
+  }
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -3108,6 +3127,7 @@ export default function AitechLabCRM() {
               jobs={jobs}
               onSms={sendSmsToJob}
               onWhatsApp={sendWhatsAppToJob}
+              nextDailyId={nextDailyId}
               onCreate={(data) => {
                 const isTech = role === "indoor_tech" || role === "outdoor_tech";
                 const creator = isTech
@@ -3199,6 +3219,7 @@ export default function AitechLabCRM() {
               smsDispatchMode={smsDispatchMode} setSmsDispatchMode={setSmsDispatchMode}
               notificationSettings={notificationSettings} setNotificationSettings={setNotificationSettings}
               loginWindowSettings={loginWindowSettings} setLoginWindowSettings={setLoginWindowSettings}
+              idConfig={idConfig} setIdConfig={setIdConfig}
             />
           )}
 
@@ -5797,7 +5818,7 @@ function FrontDeskDashboard({ jobs, technicians, tick, onAssign, onPrintLabel, o
 /* ---------------------------------------------------------------------- */
 /*  NEW JOB FORM (Front Desk)                                              */
 /* ---------------------------------------------------------------------- */
-function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [], onSms, onWhatsApp }) {
+function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [], onSms, onWhatsApp, nextDailyId }) {
   // Job type (indoor/outdoor) drives which prefix — JID or JOD — the Job ID
   // gets. Defaults to match the linked customer's type (CID → indoor,
   // COD → outdoor) but staff can override it from the dropdown.
@@ -8286,7 +8307,7 @@ function ClockInGate({ role, userName, clockingIn, onClockIn, onSwitchLogin }) {
 /*  the instant a job card is created; Manual leaves it to the front-desk  */
 /*  person to send via the Call/SMS/WhatsApp buttons on the job.           */
 /* ---------------------------------------------------------------------- */
-function SettingsView({ smsDispatchMode, setSmsDispatchMode, notificationSettings, setNotificationSettings, loginWindowSettings, setLoginWindowSettings }) {
+function SettingsView({ smsDispatchMode, setSmsDispatchMode, notificationSettings, setNotificationSettings, loginWindowSettings, setLoginWindowSettings, idConfig, setIdConfig }) {
   return (
     <div>
       <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 16 }}>Settings</div>
@@ -8318,8 +8339,50 @@ function SettingsView({ smsDispatchMode, setSmsDispatchMode, notificationSetting
 
       <LoginWindowSettingsPanel loginWindowSettings={loginWindowSettings} setLoginWindowSettings={setLoginWindowSettings} />
 
+      <IdNumberingPanel idConfig={idConfig} setIdConfig={setIdConfig} />
+
       <NotificationSettingsPanel notificationSettings={notificationSettings} setNotificationSettings={setNotificationSettings} />
     </div>
+  );
+}
+
+/* Admin-only: sets the STARTING number each ID prefix counts up from —
+   useful when switching over from an existing paper/other-system
+   numbering scheme and picking up where it left off, rather than
+   starting back at the built-in defaults. The sequence still resets and
+   restarts from this number each new day (e.g. JID-260906-5000,
+   JID-260906-5001, ... then JID-260907-5000 the next day) — changing the
+   starting number here only takes effect from today onward; IDs already
+   issued don't change. */
+function IdNumberingPanel({ idConfig, setIdConfig }) {
+  const cfg = { ...DEFAULT_ID_CONFIG, ...idConfig };
+  const patch = (key, value) => {
+    const n = Math.max(1, Number(value) || 1);
+    setIdConfig((s) => ({ ...DEFAULT_ID_CONFIG, ...s, [key]: n }));
+  };
+  const rows = [
+    { key: "jidStart", label: "Indoor Job ID (JID) starts at", example: `JID-${todayYYYYMMDD()}-${cfg.jidStart}` },
+    { key: "jodStart", label: "Outdoor Job ID (JOD) starts at", example: `JOD-${todayYYYYMMDD()}-${cfg.jodStart}` },
+    { key: "cidStart", label: "Indoor Customer ID (CID) starts at", example: `CID-${todayYYYYMMDD()}-${String(cfg.cidStart).padStart(3, "0")}` },
+    { key: "codStart", label: "Outdoor Customer ID (COD) starts at", example: `COD-${todayYYYYMMDD()}-${String(cfg.codStart).padStart(3, "0")}` },
+  ];
+  return (
+    <Panel style={{ padding: 18, maxWidth: 480, marginBottom: 18 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Job / Customer ID Numbering</div>
+      <div style={{ fontSize: 12, color: COLORS.faint, marginBottom: 14, lineHeight: 1.5 }}>
+        Sets the starting number for each ID type — useful if you're continuing from an existing numbering scheme. The sequence still restarts from this number every new day; this only changes where it starts from, not IDs already issued.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {rows.map((r) => (
+          <div key={r.key}>
+            <Field label={r.label}>
+              <Input type="number" min={1} value={cfg[r.key]} onChange={(e) => patch(r.key, e.target.value)} />
+            </Field>
+            <div style={{ fontSize: 11, color: COLORS.faint, marginTop: 4, fontFamily: FONT_MONO }}>e.g. {r.example}</div>
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
 

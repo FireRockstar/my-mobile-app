@@ -4,13 +4,15 @@ import {
   MessageSquare, Plus, Printer, Search, X, Bell, RefreshCw, CheckCircle2,
   Clock, AlertTriangle, LogOut, Phone, ChevronRight, IndianRupee,
   Banknote, CreditCard, Smartphone, Trash2, UserCircle2, ArrowLeft,
-  PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin, Eye, Mic, Upload,
+  PackagePlus, PackageMinus, TrendingUp, CircleDot, Menu, Camera, MapPin, Eye, Upload,
   Download, BarChart3, Calendar, ShieldCheck, UserPlus, Mail
 } from "lucide-react";
 import { useFirestoreArrayState, useFirestoreValueState, useFirestoreLogState } from "./services/firestoreService";
+import { Geolocation } from "@capacitor/geolocation";
+import { Capacitor, registerPlugin } from "@capacitor/core";
 import {
   OWNER_EMAIL, signInWithGoogle, signOutUser, useAuthUser, useMyStaffRecord,
-  useStaffDirectory, upsertStaffDoc, setStaffActive, deleteStaffDoc,
+  useStaffDirectory, upsertStaffDoc, setStaffActive, setStaffKioskMode, deleteStaffDoc,
 } from "./services/authService";
 
 /* ---------------------------------------------------------------------- */
@@ -582,17 +584,15 @@ const SEED_CUSTOMERS = []; // demo data removed — real records now come from F
 const SEED_ATTENDANCE = []; // demo data removed — real records now come from Firestore
 
 /* Wraps the browser Geolocation API in a promise; resolves to null
-   (rather than rejecting) if permission is denied or unavailable, so a
+   rather than rejecting) if permission is denied or unavailable, so a
    clock-in/out can still proceed without a location fix. */
-function getGeoSnapshot() {
-  return new Promise((resolve) => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) { resolve(null); return; }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy) }),
-      () => resolve(null),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
-    );
-  });
+async function getGeoSnapshot() {
+  try {
+    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+    return { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy) };
+  } catch (err) {
+    return null;
+  }
 }
 function mapsLink(loc) {
   return loc ? `https://www.google.com/maps?q=${loc.lat},${loc.lng}` : null;
@@ -1169,6 +1169,8 @@ function useBackClose(id, isOpen, close) {
 /* ---------------------------------------------------------------------- */
 /*  ROOT APP                                                               */
 /* ---------------------------------------------------------------------- */
+const Kiosk = registerPlugin("KioskPlugin");
+
 export default function AitechLabCRM() {
   // --- AUTH: Google Sign-In + Admin-controlled staff directory ---------
   // authUser: undefined while Firebase is still checking, null if signed
@@ -1387,11 +1389,14 @@ export default function AitechLabCRM() {
     let cancelled = false;
     import("@capacitor/app").then(({ App: CapacitorApp }) => {
       if (cancelled) return;
-      CapacitorApp.addListener("backButton", ({ canGoBack }) => {
-        if (canGoBack) {
-          window.history.back(); // triggers the existing popstate handler above, which pops whatever's on top of navBackStack (a tab, a modal, a popup) and closes just that
+      CapacitorApp.addListener("backButton", () => {
+        // navBackStack is our source of truth for the app's internal screen/modal stack.
+        // If it has items, we go back in history (which triggers popstate -> top.close()).
+        // If it's empty, we are on the main Home screen, so we exit the app.
+        if (navBackStack.length > 0) {
+          window.history.back();
         } else {
-          CapacitorApp.exitApp(); // stack is genuinely empty — this really is the Home screen, so actually exit
+          CapacitorApp.exitApp();
         }
       }).then((h) => { listenerHandle = h; });
     }).catch((err) => {
@@ -1980,49 +1985,71 @@ export default function AitechLabCRM() {
     });
   }, [jobs]);
 
+  /* KIOSK / LOCK TASK MODE — controlled by Admin in Manage Staff.
+     When enabled for a user, the app calls native startLockTask() on
+     login and stopLockTask() on sign-out. This requires the app to be
+     set as the Default Launcher to be truly secure. */
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    const shouldBeLocked = !!(myStaff && myStaff.active && myStaff.kioskEnabled);
+
+    if (shouldBeLocked) {
+      Kiosk.enterKioskMode().catch((err) => console.error("Kiosk Lock Failed:", err));
+    } else {
+      Kiosk.exitKioskMode().catch(() => {}); // might fail if not locked, ignore
+    }
+  }, [myStaff]);
+
   /* LIVE GPS TRACKING — while Front Desk, or an Indoor/Outdoor Technician,
-     is clocked in and actively using the app on their own device, this
-     continuously watches their position and reports it into
-     liveLocations (a real Firestore collection — see above) so anyone
-     viewing Live Tracking sees where they currently are, not just their
-     one-time clock-in snapshot. Stops the moment they clock out. Because
-     every person's phone reports independently to the same Firestore
-     collection, everyone can be live simultaneously — this is real
-     multi-device tracking, not a single-session simulation. */
+     is logged in, this continuously watches their position and reports it
+     into liveLocations (a real Firestore collection).
+     Stops the moment they sign out. */
   useEffect(() => {
     const trackableRole = role === "indoor_tech" || role === "outdoor_tech" || role === "frontdesk";
     const myId = role === "frontdesk" ? "frontdesk" : activeTechId;
     if (!trackableRole || !myId) return;
-    if (typeof navigator === "undefined" || !navigator.geolocation) return;
-    const onShift = attendance.some((a) => a.userId === myId && !a.clockOut && isSameDay(a.clockIn));
-    if (!onShift) return;
 
-    // GPS fixes can arrive every few seconds — writing every one of them
-    // to Firestore would run up write costs for no real benefit. A
-    // position update every ~20s is plenty for "where is this person
-    // right now" purposes.
+    let watchId = null;
     const MIN_UPDATE_INTERVAL_MS = 20 * 1000;
     let lastSentAt = 0;
 
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const now = Date.now();
-        if (now - lastSentAt < MIN_UPDATE_INTERVAL_MS) return;
-        lastSentAt = now;
-        setLiveLocationsList((list) => {
-          const others = list.filter((l) => l.userId !== myId);
-          return [...others, {
-            userId: myId, lat: pos.coords.latitude, lng: pos.coords.longitude,
-            accuracy: Math.round(pos.coords.accuracy), ts: now,
-          }];
-        });
-      },
-      () => { /* permission denied or unavailable — silently skip live tracking */ },
-      { enableHighAccuracy: true, maximumAge: 30000, timeout: 20000 }
-    );
-    return () => navigator.geolocation.clearWatch(watchId);
+    async function startTracking() {
+      try {
+        const perms = await Geolocation.checkPermissions();
+        if (perms.location !== "granted") return;
+
+        watchId = await Geolocation.watchPosition(
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
+          (pos, err) => {
+            if (err || !pos) return;
+            const now = Date.now();
+            if (now - lastSentAt < MIN_UPDATE_INTERVAL_MS) return;
+            lastSentAt = now;
+
+            setLiveLocationsList((list) => {
+              const others = list.filter((l) => l.userId !== myId);
+              return [...others, {
+                userId: myId,
+                lat: pos.coords.latitude,
+                lng: pos.coords.longitude,
+                accuracy: Math.round(pos.coords.accuracy),
+                ts: now,
+              }];
+            });
+          }
+        );
+      } catch (err) {
+        console.error("Live tracking failed to start:", err);
+      }
+    }
+
+    startTracking();
+
+    return () => {
+      if (watchId) Geolocation.clearWatch({ id: watchId });
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role, activeTechId, attendance]);
+  }, [role, activeTechId]);
 
   /* Technician-side notification: the moment Admin/Front Desk marks a job's
      customer confirmation as OK, pop it up on that technician's screen —
@@ -2862,6 +2889,7 @@ export default function AitechLabCRM() {
   const NAV = {
     admin: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { id: "launcher", label: "Kiosk Launcher", icon: Smartphone },
       { id: "customers", label: "Customers (CID)", icon: Phone },
       { id: "jobcards", label: "Job Cards", icon: ClipboardList },
       { id: "billing", label: "Billing", icon: Receipt },
@@ -2877,6 +2905,7 @@ export default function AitechLabCRM() {
     ],
     frontdesk: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { id: "launcher", label: "Kiosk Launcher", icon: Smartphone },
       { id: "customers", label: "Customers (CID)", icon: Phone },
       { id: "newjob", label: "New Job Card", icon: Plus },
       { id: "jobcards", label: "Job Cards", icon: ClipboardList },
@@ -2890,10 +2919,12 @@ export default function AitechLabCRM() {
     ],
     indoor_tech: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { id: "launcher", label: "Kiosk Launcher", icon: Smartphone },
       { id: "myjobs", label: "My Jobs", icon: Wrench },
     ],
     outdoor_tech: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { id: "launcher", label: "Kiosk Launcher", icon: Smartphone },
     ],
   };
 
@@ -3090,7 +3121,9 @@ export default function AitechLabCRM() {
         />
 
         <div className="main-scroll" style={{ flex: 1, overflowY: "auto", padding: 22 }}>
-          {tab === "dashboard" && role === "admin" && (
+          {tab === "launcher" && <KioskLauncher />}
+
+      {tab === "dashboard" && role === "admin" && (
             <Dashboard
               jobs={jobs} invoices={invoices} technicians={technicians} parts={parts}
               revenueToday={revenueToday} outstandingDues={outstandingDues} pendingOrders={pendingOrders}
@@ -3751,54 +3784,46 @@ export default function AitechLabCRM() {
 /*  while using the app.                                                  */
 /* ---------------------------------------------------------------------- */
 function useGeolocationPermission() {
-  // "checking" | "granted" | "denied" | "prompt" | "unsupported"
   const [status, setStatus] = useState("checking");
-  const [pulse, setPulse] = useState(0); // bump to force a manual recheck (the Retry button)
+  const [pulse, setPulse] = useState(0);
 
   useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      setStatus("unsupported");
-      return;
-    }
     let cancelled = false;
-    let permObj = null;
 
-    // Calling this is what actually makes the OS/browser permission
-    // dialog pop up automatically when permission hasn't been decided
-    // yet ("prompt") — no separate "please allow" button needed for the
-    // very first ask.
-    function requestPosition() {
-      navigator.geolocation.getCurrentPosition(
-        () => { if (!cancelled) setStatus("granted"); },
-        (err) => { if (!cancelled) setStatus(err.code === 1 ? "denied" : "prompt"); },
-        { maximumAge: 60000, timeout: 10000 }
-      );
-    }
-
-    if (navigator.permissions && navigator.permissions.query) {
-      navigator.permissions.query({ name: "geolocation" }).then((result) => {
+    async function checkAndRequest() {
+      try {
+        const perms = await Geolocation.checkPermissions();
         if (cancelled) return;
-        permObj = result;
-        setStatus(result.state);
-        // Live-updates the moment the person flips location on/off in
-        // their phone's system settings, without needing to reopen the app.
-        result.onchange = () => setStatus(result.state);
-        if (result.state !== "denied") requestPosition();
-      }).catch(requestPosition);
-    } else {
-      // Permissions API unavailable (older Safari/iOS, some WebViews) —
-      // requesting a position directly still triggers the native prompt.
-      requestPosition();
+
+        if (perms.location !== "granted") {
+          const req = await Geolocation.requestPermissions();
+          if (cancelled) return;
+          if (req.location !== "granted") {
+            setStatus("denied");
+            return;
+          }
+        }
+
+        // Even if permission is granted, GPS hardware might be off.
+        // Try a quick check.
+        try {
+          await Geolocation.getCurrentPosition({ timeout: 3000 });
+          if (!cancelled) setStatus("granted");
+        } catch (err) {
+          // Error code 2 usually means location provider unavailable (GPS off)
+          if (!cancelled) setStatus("disabled");
+        }
+      } catch (err) {
+        if (!cancelled) setStatus("unsupported");
+      }
     }
 
-    // Extra safety net for browsers where the Permissions API's onchange
-    // event doesn't fire reliably — re-checks every 30s regardless.
-    const pollId = setInterval(() => { if (!cancelled) requestPosition(); }, 30000);
+    checkAndRequest();
+    const pollId = setInterval(checkAndRequest, 15000);
 
     return () => {
       cancelled = true;
       clearInterval(pollId);
-      if (permObj) permObj.onchange = null;
     };
   }, [pulse]);
 
@@ -3807,23 +3832,25 @@ function useGeolocationPermission() {
 
 function LocationRequiredScreen({ status, onRetry, onSignOut }) {
   const isDenied = status === "denied";
+  const isDisabled = status === "disabled";
   return (
     <AuthShell>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10, textAlign: "left", padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.85)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.7)", marginBottom: 14 }}>
         <MapPin size={18} color="#D97706" style={{ flexShrink: 0, marginTop: 1 }} />
         <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-          {isDenied
-            ? "Location access is turned off for this app. Front Desk and Technician logins require location to stay on the whole time you're using the app."
-            : "This app needs your location to continue — allow location access when your phone asks."}
+          {isDenied && "Location access is denied. Front Desk and Technician logins require location to be allowed 'All the time' for live tracking."}
+          {isDisabled && "Your phone's GPS/Location is turned OFF. Please turn it on to continue using the app."}
+          {!isDenied && !isDisabled && "This app needs your location to continue — please allow location access when prompted."}
         </div>
       </div>
-      {isDenied && (
+      {(isDenied || isDisabled) && (
         <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.9)", textShadow: "0 1px 8px rgba(80,20,120,0.3)", lineHeight: 1.6, marginBottom: 16, textAlign: "left" }}>
-          Turn it back on: Phone Settings → Apps → AitechLab CRM → Permissions → Location → Allow. Then tap Retry below.
+          {isDenied && "Fix it: Phone Settings → Apps → AitechLab CRM → Permissions → Location → Allow all the time."}
+          {isDisabled && "Fix it: Swipe down from the top of your screen and tap the 'Location' or 'GPS' icon to turn it ON."}
         </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <Btn onClick={onRetry}><RefreshCw size={14} /> Retry</Btn>
+        <Btn onClick={onRetry}><RefreshCw size={14} /> I've turned it on, Retry</Btn>
         <Btn variant="outline" onClick={onSignOut} style={{ width: "100%" }}><LogOut size={14} /> Sign out</Btn>
       </div>
     </AuthShell>
@@ -4000,9 +4027,13 @@ function ManageStaffView({ technicians, myEmail }) {
                 <div style={{ fontSize: 11.5, color: COLORS.muted, marginTop: 2 }}>
                   {s.name ? `${s.name} · ` : ""}{roleLabels[s.role] || s.role}
                   {s.techId ? ` — linked to ${technicians.find((t) => t.id === s.techId)?.name || s.techId}` : ""}
+                  {s.kioskEnabled && <span style={{ marginLeft: 8, color: COLORS.teal, fontWeight: 700 }}>[Kiosk Mode]</span>}
                 </div>
               </div>
               <div style={{ display: "flex", gap: 7 }}>
+                <Btn size="sm" variant={s.kioskEnabled ? "teal" : "outline"} onClick={() => setStaffKioskMode(s.email, !s.kioskEnabled)}>
+                  {s.kioskEnabled ? "Lock Mode: ON" : "Lock Mode: OFF"}
+                </Btn>
                 <Btn size="sm" variant="outline" onClick={() => setStaffActive(s.email, s.active === false)}>
                   {s.active === false ? "Enable" : "Disable"}
                 </Btn>
@@ -5169,8 +5200,8 @@ function TechUpdateRequestForm({ job, onSubmit }) {
         </>
       )}
       <div style={{ height: 12 }} />
-      <Field label="Note — tap the mic to speak">
-        <VoiceInput value={note} onChange={setNote} placeholder="e.g. Panel replaced, testing now — should be ready by evening…" lang="en" multiline />
+      <Field label="Note">
+        <TextArea value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Panel replaced, testing now — should be ready by evening…" />
       </Field>
       <div style={{ marginTop: 14 }}>
         <Btn onClick={() => onSubmit(status, note.trim())}>
@@ -5203,8 +5234,8 @@ function TechUpdateFeedbackBody({ job, onSend, onDone }) {
         </div>
       </div>
 
-      <Field label="Message to Customer — edit if needed, tap the mic to speak">
-        <VoiceInput value={message} onChange={setMessage} placeholder="Message to send…" lang="en" multiline />
+      <Field label="Message to Customer — edit if needed">
+        <TextArea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Message to send…" />
       </Field>
 
       <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
@@ -5874,7 +5905,6 @@ function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [], onSms
   const [subFaults, setSubFaults] = useState([]);
   const [faultPhoto, setFaultPhoto] = useState(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState(presetCustomer?.customerId || "");
-  const [voiceLang, setVoiceLang] = useState("en");
   const setVal = (k) => (v) => setF((prev) => ({ ...prev, [k]: v }));
   const setFault = (val) => setF((prev) => ({ ...prev, fault: val }));
   const valid = f.customer.trim() && f.phone.replace(/\D/g, "").length === 10 && f.brand.trim() && f.model.trim();
@@ -5970,26 +6000,26 @@ function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [], onSms
       )}
 
       <div className="form-grid-2col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        <Field label="Customer Name — tap the mic to speak">
-          <VoiceInput value={f.customer} onChange={setVal("customer")} placeholder="e.g. Anitha Raman" lang={voiceLang} onLangChange={setVoiceLang} />
+        <Field label="Customer Name">
+          <Input value={f.customer} onChange={(e) => setVal("customer")(e.target.value)} placeholder="e.g. Anitha Raman" />
         </Field>
-        <Field label="Phone Number — tap the mic to speak the number">
-          <VoiceInput value={f.phone} onChange={setVal("phone")} placeholder="98432 11001" lang="en" numeric phoneFormat />
+        <Field label="Phone Number">
+          <Input value={f.phone} onChange={(e) => setVal("phone")(formatPhoneDigits(e.target.value))} placeholder="98432 11001" />
         </Field>
-        <Field label="TV Brand — tap the mic to speak">
-          <VoiceInput value={f.brand} onChange={setVal("brand")} placeholder="e.g. Samsung, LG, Sony" lang={voiceLang} />
+        <Field label="TV Brand">
+          <Input value={f.brand} onChange={(e) => setVal("brand")(e.target.value)} placeholder="e.g. Samsung, LG, Sony" />
         </Field>
-        <Field label="Model Number — tap the mic to speak">
-          <VoiceInput value={f.model} onChange={setVal("model")} placeholder="e.g. UA43T5350" lang={voiceLang} />
+        <Field label="Model Number">
+          <Input value={f.model} onChange={(e) => setVal("model")(e.target.value)} placeholder="e.g. UA43T5350" />
         </Field>
-        <Field label="Accessories Brought — tap the mic to speak">
-          <VoiceInput value={f.accessories} onChange={setVal("accessories")} placeholder="Remote, cable, stand…" lang={voiceLang} />
+        <Field label="Accessories Brought">
+          <Input value={f.accessories} onChange={(e) => setVal("accessories")(e.target.value)} placeholder="Remote, cable, stand…" />
         </Field>
-        <Field label="Estimated Cost (₹) — tap the mic to speak the amount">
-          <VoiceInput value={f.estimate} onChange={setVal("estimate")} placeholder="Optional" lang="en" numeric type="number" />
+        <Field label="Estimated Cost (₹)">
+          <Input value={f.estimate} onChange={(e) => setVal("estimate")(e.target.value)} placeholder="Optional" type="number" />
         </Field>
-        <Field label="Location — tap the mic to speak">
-          <VoiceInput value={f.location} onChange={setVal("location")} placeholder="e.g. RS Puram, Coimbatore" lang={voiceLang} />
+        <Field label="Location">
+          <Input value={f.location} onChange={(e) => setVal("location")(e.target.value)} placeholder="e.g. RS Puram, Coimbatore" />
         </Field>
         <Field label="General Fault (optional)">
           <Select value={f.generalFault} onChange={(e) => setVal("generalFault")(e.target.value)}>
@@ -5999,8 +6029,8 @@ function NewJobForm({ onCreate, presetCustomer, customers = [], jobs = [], onSms
         </Field>
       </div>
       <div style={{ marginTop: 14 }}>
-        <Field label="Reported Issue (optional) — tap the mic to speak">
-          <VoiceInput value={f.issue} onChange={setVal("issue")} placeholder="Describe the fault as reported by customer…" lang={voiceLang} multiline />
+        <Field label="Reported Issue (optional)">
+          <TextArea value={f.issue} onChange={(e) => setVal("issue")(e.target.value)} placeholder="Describe the fault as reported by customer…" />
         </Field>
       </div>
       <div style={{ marginTop: 16 }}>
@@ -6186,13 +6216,6 @@ function CustomersView({ customers, jobs, tick, role, onLogCall, onAddNote, onCr
 }
 
 /* ---------------------------------------------------------------------- */
-/*  VOICE-TO-TEXT INPUT — wraps the browser's Web Speech API (available    */
-/*  in Chrome/Android WebView) behind a mic button next to a normal text   */
-/*  input. Tap the mic, speak in Tamil or English, and the recognized      */
-/*  text is appended to the field. Falls back to a plain input with the    */
-/*  mic hidden if the browser doesn't support SpeechRecognition (e.g.      */
-/*  desktop Safari, some in-app WebViews).                                 */
-/* ---------------------------------------------------------------------- */
 /* Minimal phone-entry form standing in for real caller-ID detection —
    see the note in the modal above about what a native Android app would
    do here instead (CallScreeningService reading the number automatically). */
@@ -6282,24 +6305,6 @@ function IncomingCallPopup({ phone, customer, jobs, onClose, onCreateCustomer, o
   );
 }
 
-/* Converts a speech-recognition transcript into a digit string — handles
-   both literal numerals ("9843211001") and spoken digit words ("nine eight
-   four three...", including "oh"/"o" for zero), which is how many mobile
-   browsers transcribe a rattled-off phone number. */
-function speechToDigits(transcript) {
-  const WORD_DIGITS = {
-    zero: "0", oh: "0", o: "0", one: "1", won: "1", two: "2", to: "2", too: "2",
-    three: "3", four: "4", for: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9",
-  };
-  const tokens = transcript.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-  let digits = "";
-  for (const t of tokens) {
-    if (/^\d+$/.test(t)) digits += t;
-    else if (WORD_DIGITS[t]) digits += WORD_DIGITS[t];
-  }
-  return digits;
-}
-
 /* Formats a 10-digit phone number as "XXXXX XXXXX" — first five digits,
    a space, then the remaining five. Strips anything already typed that
    isn't a digit and caps at 10 digits before formatting, so it's safe to
@@ -6309,78 +6314,11 @@ function formatPhoneDigits(raw) {
   return digits.length > 5 ? `${digits.slice(0, 5)} ${digits.slice(5)}` : digits;
 }
 
-function VoiceInput({ value, onChange, placeholder, lang, onLangChange, numeric, maxLength, autoFocus, multiline, type, phoneFormat }) {
-  const [listening, setListening] = useState(false);
-  const recogRef = useRef(null);
-  const SpeechRecognition = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-  const effectiveMaxLength = phoneFormat ? 11 : maxLength;
-
-  function toggleListen() {
-    if (!SpeechRecognition) return;
-    if (listening) {
-      recogRef.current?.stop();
-      return;
-    }
-    const recog = new SpeechRecognition();
-    recog.lang = lang === "ta" ? "ta-IN" : "en-IN";
-    recog.interimResults = false;
-    recog.maxAlternatives = 1;
-    recog.onresult = (e) => {
-      const heard = e.results[0][0].transcript;
-      if (numeric) {
-        const digits = speechToDigits(heard);
-        const merged = (value || "").replace(/\D/g, "") + digits;
-        onChange(phoneFormat ? formatPhoneDigits(merged) : (maxLength ? merged.slice(0, maxLength) : merged));
-      } else {
-        onChange((value ? value + " " : "") + heard);
-      }
-    };
-    recog.onerror = () => setListening(false);
-    recog.onend = () => setListening(false);
-    recogRef.current = recog;
-    setListening(true);
-    recog.start();
-  }
-
-  return (
-    <div style={{ display: "flex", gap: 6, alignItems: multiline ? "flex-start" : "center" }}>
-      {multiline ? (
-        <TextArea value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} style={{ flex: 1 }} />
-      ) : (
-        <Input
-          type={type} value={value}
-          onChange={(e) => onChange(phoneFormat ? formatPhoneDigits(e.target.value) : e.target.value)}
-          placeholder={placeholder} style={{ flex: 1 }} autoFocus={autoFocus} maxLength={effectiveMaxLength}
-        />
-      )}
-      {onLangChange && (
-        <Select value={lang} onChange={(e) => onLangChange(e.target.value)} style={{ width: 76, flexShrink: 0, padding: "9px 6px", fontSize: 12 }}>
-          <option value="en">EN</option>
-          <option value="ta">TA</option>
-        </Select>
-      )}
-      {SpeechRecognition && (
-        <button
-          type="button" onClick={toggleListen} title={listening ? "Listening… tap to stop" : "Tap to speak"}
-          style={{
-            width: 34, height: 34, flexShrink: 0, borderRadius: 7, border: `1px solid ${listening ? COLORS.red : COLORS.border}`,
-            background: listening ? COLORS.redDim : COLORS.panel2, cursor: "pointer",
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}
-        >
-          <Mic size={15} color={listening ? COLORS.red : COLORS.muted} />
-        </button>
-      )}
-    </div>
-  );
-}
-
 function LogCallForm({ customers, jobs = [], smsLog = [], onSubmit, onCancel, onViewCustomer, onCreateJob }) {
   const [phone, setPhone] = useState("");
   const [name, setName] = useState("");
   const [location, setLocation] = useState("");
   const [note, setNote] = useState("");
-  const [voiceLang, setVoiceLang] = useState("en");
   const [customerType, setCustomerType] = useState("indoor");
   const [showJobs, setShowJobs] = useState(false);
 
@@ -6418,8 +6356,8 @@ function LogCallForm({ customers, jobs = [], smsLog = [], onSubmit, onCancel, on
 
   return (
     <div>
-      <Field label="Phone Number — tap the mic to speak the number">
-        <VoiceInput value={phone} onChange={setPhone} placeholder="98432 11001" lang="en" numeric phoneFormat autoFocus />
+      <Field label="Phone Number">
+        <Input value={phone} onChange={(e) => setPhone(formatPhoneDigits(e.target.value))} placeholder="98432 11001" autoFocus />
       </Field>
       {recentCalls.length > 0 && (
         <div style={{ marginTop: 8 }}>
@@ -6532,13 +6470,13 @@ function LogCallForm({ customers, jobs = [], smsLog = [], onSubmit, onCancel, on
             </Field>
           </div>
           <div style={{ marginTop: 12 }}>
-            <Field label="Customer Name (optional if unknown yet) — tap the mic to speak">
-              <VoiceInput value={name} onChange={setName} placeholder="e.g. Lakshmi Narayanan" lang={voiceLang} onLangChange={setVoiceLang} />
+            <Field label="Customer Name (optional if unknown yet)">
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Lakshmi Narayanan" />
             </Field>
           </div>
           <div style={{ marginTop: 12 }}>
-            <Field label="Location — tap the mic to speak">
-              <VoiceInput value={location} onChange={setLocation} placeholder="e.g. RS Puram, Coimbatore" lang={voiceLang} />
+            <Field label="Location">
+              <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g. RS Puram, Coimbatore" />
             </Field>
           </div>
         </>
@@ -7113,8 +7051,8 @@ function UpdateJobForm({ job, parts, onSave, onWhatsApp, technicians = [], jobs 
           </Field>
         </>
       ) : (
-        <Field label="Progress Note (sent to customer via SMS) — tap the mic to speak">
-          <VoiceInput value={note} onChange={setNote} placeholder="e.g. Diagnosed T-Con board fault, replacing now…" lang="en" multiline />
+        <Field label="Progress Note (sent to customer via SMS)">
+          <TextArea value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Diagnosed T-Con board fault, replacing now…" />
         </Field>
       )}
       <div style={{ height: 14 }} />
@@ -8845,6 +8783,91 @@ function SoundConfigRow({ label, config, onChange }) {
   );
 }
 
+/* ---------------------------------------------------------------------- */
+/*  KIOSK LAUNCHER — Built-in dialpad and whitelisted app links            */
+/* ---------------------------------------------------------------------- */
+function KioskLauncher() {
+  const [digits, setDigits] = useState("");
+  const apps = [
+    { name: "WhatsApp", package: "com.whatsapp", icon: MessageSquare, color: "#25D366" },
+    { name: "Google Maps", package: "com.google.android.apps.maps", icon: MapPin, color: "#4285F4" },
+    { name: "Camera", package: "com.android.camera", icon: Camera, color: "#EA4335" },
+  ];
+
+  const handleLaunch = (pkg) => {
+    if (Capacitor.isNativePlatform()) {
+      Kiosk.launchApp({ package: pkg }).catch((err) => alert("App not found: " + pkg));
+    } else {
+      alert("Launching " + pkg + " (native only)");
+    }
+  };
+
+  const handleCall = () => {
+    if (!digits) return;
+    window.location.href = `tel:${digits}`;
+  };
+
+  const addDigit = (d) => {
+    if (digits.length < 15) setDigits((prev) => prev + d);
+  };
+
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 16, textAlign: "center" }}>Kiosk Home</div>
+
+      <Panel style={{ padding: 20, marginBottom: 20 }}>
+        <div style={{
+          fontSize: 28, fontFamily: FONT_MONO, fontWeight: 700, textAlign: "center",
+          marginBottom: 20, background: COLORS.panel2, padding: "12px", borderRadius: 8,
+          minHeight: 50, display: "flex", alignItems: "center", justifyContent: "center"
+        }}>
+          {digits || "Dial number…"}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, maxWidth: 280, margin: "0 auto" }}>
+          {[1,2,3,4,5,6,7,8,9,"*",0,"#"].map((d) => (
+            <button
+              key={d}
+              onClick={() => addDigit(String(d))}
+              style={{
+                height: 60, borderRadius: 999, border: `1px solid ${COLORS.border}`,
+                background: COLORS.panel2, fontSize: 20, fontWeight: 700, cursor: "pointer"
+              }}
+            >
+              {d}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginTop: 20, maxWidth: 280, margin: "20px auto 0" }}>
+          <Btn variant="teal" style={{ flex: 2, height: 54, borderRadius: 12 }} onClick={handleCall}>
+            <Phone size={20} /> Call Now
+          </Btn>
+          <Btn variant="danger" style={{ flex: 1, height: 54, borderRadius: 12 }} onClick={() => setDigits("")}>
+            <X size={20} />
+          </Btn>
+        </div>
+      </Panel>
+
+      <div style={{ fontWeight: 700, fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, color: COLORS.muted, marginBottom: 12 }}>
+        Permitted Applications
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        {apps.map((app) => (
+          <Panel key={app.package} style={{ padding: 16, cursor: "pointer" }} onClick={() => handleLaunch(app.package)}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: `${app.color}22`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <app.icon size={20} color={app.color} />
+              </div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{app.name}</div>
+            </div>
+          </Panel>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AttendanceView({ attendance, tick }) {
   const sorted = [...attendance].sort((a, b) => b.clockIn - a.clockIn);
   const onShift = sorted.filter((a) => !a.clockOut);
@@ -9046,7 +9069,13 @@ function PrintChrome({ onBack, onPrinted, children }) {
           On a phone, this opens the share sheet — pick your label/receipt printer app, or "Print" if you have a print service installed.
         </div>
       )}
-      <style>{`@media print { .no-print { display: none !important; } }`}</style>
+      <style>{`
+        @media print {
+          .no-print { display: none !important; }
+          body { margin: 0; padding: 0; background: #fff; }
+          @page { margin: 0; }
+        }
+      `}</style>
       <div ref={printRef}>{children}</div>
     </div>
   );
@@ -9056,29 +9085,37 @@ function PrintLabel({ job, onBack, onMarkPrinted }) {
   return (
     <PrintChrome onBack={onBack} onPrinted={() => onMarkPrinted && onMarkPrinted(job.id)}>
       <div className="print-chrome-inner" style={{
-        width: 380, maxWidth: "100%", border: "2px solid #111", borderRadius: 10, padding: 18, fontFamily: FONT_MONO, boxSizing: "border-box",
+        width: "100%", maxWidth: 380, margin: "0 auto", border: "2px solid #111", borderRadius: 10, padding: 12, fontFamily: FONT_MONO, boxSizing: "border-box",
       }}>
-        <div style={{ borderBottom: "2px solid #111", paddingBottom: 5, marginBottom: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "stretch", lineHeight: 1.2 }}>
-            <div style={{ textAlign: "center", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 800, fontSize: 14, whiteSpace: "nowrap" }}>AITECHLAB LED TV SERVICE CENTER</div>
-              <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: 1, lineHeight: 1.15, marginTop: 1 }}>{fmtPhone("6383647753")}</div>
+        <div style={{ borderBottom: "2px solid #111", paddingBottom: 8, marginBottom: 8 }}>
+          {/* Row 1: Header Title */}
+          <div style={{ fontWeight: 800, fontSize: 11.5, whiteSpace: "nowrap", letterSpacing: -0.2, marginBottom: 4, width: "100%" }}>
+            AITECHLAB LED TV SERVICE CENTER
+          </div>
+
+          {/* Row 2: Phone & IDs Flex Row */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 6 }}>
+            {/* Left Side: Single-Line Phone */}
+            <div style={{ fontSize: 18, fontWeight: 800, whiteSpace: "nowrap", flexShrink: 0 }}>
+              {fmtPhone("6383647753")}
             </div>
-            <div style={{ textAlign: "right", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
-              <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, whiteSpace: "nowrap" }}>{job.customerId || "—"}</div>
-              <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1, whiteSpace: "nowrap", marginBottom: 4 }}>{job.id}</div>
+
+            {/* Right Side: Compact Stacked IDs */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", textAlign: "right", minWidth: 0 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 800, lineHeight: 1.1, whiteSpace: "nowrap", color: "#333" }}>{job.customerId || "—"}</div>
+              <div style={{ fontSize: 10.5, fontWeight: 800, lineHeight: 1.1, whiteSpace: "nowrap" }}>{job.id}</div>
             </div>
           </div>
         </div>
-        <div style={{ fontSize: 12, lineHeight: 1.9 }}>
-          <div><strong>Customer:</strong> {job.customer}</div>
-          <div><strong>Device:</strong> {job.brand} {job.model}</div>
-          <div><strong>Issue:</strong> {job.issue}</div>
-          <div><strong>Accessories:</strong> {job.accessories || "—"}</div>
-          <div><strong>Location:</strong> {job.location || "________________"}</div>
+        <div style={{ fontSize: 11.5, lineHeight: 1.6 }}>
+          <div style={{ wordBreak: "break-word" }}><strong>Customer:</strong> {job.customer}</div>
+          <div style={{ wordBreak: "break-word" }}><strong>Device:</strong> {job.brand} {job.model}</div>
+          <div style={{ wordBreak: "break-word" }}><strong>Issue:</strong> {job.issue}</div>
+          <div style={{ wordBreak: "break-word" }}><strong>Accessories:</strong> {job.accessories || "—"}</div>
+          <div style={{ wordBreak: "break-word" }}><strong>Location:</strong> {job.location || "________________"}</div>
           <div><strong>Intake:</strong> {fmtDateTime(job.intake)}</div>
         </div>
-        <div style={{ marginTop: 14, borderTop: "1px dashed #111", paddingTop: 8, fontSize: 10, letterSpacing: 0.5, textAlign: "center", whiteSpace: "nowrap" }}>
+        <div style={{ marginTop: 10, borderTop: "1px dashed #111", paddingTop: 6, fontSize: 9.5, letterSpacing: 0.3, textAlign: "center" }}>
           KEEP THIS LABEL ATTACHED TO THE UNIT · {job.id}
         </div>
       </div>
@@ -9089,24 +9126,24 @@ function PrintLabel({ job, onBack, onMarkPrinted }) {
 function PrintInvoice({ invoice, job, onBack }) {
   return (
     <PrintChrome onBack={onBack}>
-      <div style={{ maxWidth: 620, width: "100%", margin: "0 auto", border: "1px solid #ccc", borderRadius: 10, padding: 28, boxSizing: "border-box" }}>
+      <div className="print-chrome-inner" style={{ maxWidth: 620, width: "100%", margin: "0 auto", border: "1px solid #ccc", borderRadius: 10, padding: "clamp(12px, 4vw, 28px)", boxSizing: "border-box", background: "#fff", overflowWrap: "anywhere" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "2px solid #111", paddingBottom: 14, marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 19 }}>AitechLab CRM</div>
+          <div style={{ minWidth: 200, flex: 1 }}>
+            <div style={{ fontWeight: 800, fontSize: "clamp(16px, 5vw, 19px)", wordBreak: "break-word" }}>AITECHLAB LED TV SERVICE CENTER</div>
             <div style={{ fontSize: 11.5, color: "#555" }}>LED / LCD Television Sales &amp; Service</div>
-            <div style={{ fontSize: 11.5, color: "#555" }}>Coimbatore, Tamil Nadu · +91 98765 00000</div>
+            <div style={{ fontSize: 11.5, color: "#555" }}>Coimbatore, Tamil Nadu · +91 63836 47753</div>
           </div>
-          <div style={{ textAlign: "right" }}>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
             <div style={{ fontFamily: FONT_MONO, fontWeight: 800, fontSize: 16 }}>{invoice.id}</div>
             <div style={{ fontSize: 11.5, color: "#555" }}>{fmtDate(invoice.createdAt)}</div>
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 18, fontSize: 12.5 }} className="form-grid-2col">
-          <div><strong>Billed to:</strong> {invoice.customer}</div>
-          <div><strong>Job Card:</strong> {invoice.jobId}</div>
-          {job && <div><strong>Device:</strong> {job.brand} {job.model}</div>}
-          <div><strong>Payment Method:</strong> {invoice.paymentMethod}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 18, fontSize: 12.5 }}>
+          <div style={{ wordBreak: "break-word" }}><strong>Billed to:</strong> {invoice.customer}</div>
+          <div style={{ wordBreak: "break-word" }}><strong>Job Card:</strong> {invoice.jobId}</div>
+          {job && <div style={{ wordBreak: "break-word" }}><strong>Device:</strong> {job.brand} {job.model}</div>}
+          <div style={{ wordBreak: "break-word" }}><strong>Payment Method:</strong> {invoice.paymentMethod}</div>
         </div>
 
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, marginBottom: 16 }}>

@@ -2,6 +2,9 @@ node_modules/
 dist/
 android/app/build/
 android/.gradle/
+android/.gradle_home/
+android/.gradle_home_new/
 android/local.properties
+android/gradle/gradle-daemon-jvm.properties
 .DS_Store
 *.log

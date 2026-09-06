@@ -143,6 +143,10 @@ export async function setStaffActive(email, active) {
   await setDoc(doc(db, "staff", email), { active }, { merge: true });
 }
 
+export async function setStaffKioskMode(email, kioskEnabled) {
+  await setDoc(doc(db, "staff", email), { kioskEnabled }, { merge: true });
+}
+
 export async function deleteStaffDoc(email) {
   await deleteDoc(doc(db, "staff", email));
 }

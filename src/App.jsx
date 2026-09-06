@@ -1365,6 +1365,41 @@ export default function AitechLabCRM() {
   // login starts a fresh stack instead of carrying over stale entries.
   useEffect(() => { if (!role) tabHistoryInitRef.current = false; }, [role]);
 
+  /* --------------------------------------------------------------- */
+  /*  NATIVE ANDROID HARDWARE BACK BUTTON — everything above (tab        */
+  /*  history + useBackClose) already tracks "what should back go to"    */
+  /*  correctly via window.history/popstate, which is all a web browser  */
+  /*  needs. But inside the native Capacitor Android app, the hardware   */
+  /*  back button/gesture doesn't reliably map to that SPA-only history  */
+  /*  by default — Capacitor's built-in fallback behavior can just exit  */
+  /*  the app outright instead of calling history.back(). This listener  */
+  /*  is the documented fix: take explicit control of the hardware back  */
+  /*  button, and only really exit when Capacitor itself reports there's */
+  /*  nothing left to go back to (which — since our own code is the only */
+  /*  thing ever pushing history entries — means the tab/modal stack     */
+  /*  above is genuinely empty, i.e. the user is at the true Home/base    */
+  /*  screen). Web/PWA builds don't need this at all — the browser's own  */
+  /*  back button already fires popstate correctly on its own. */
+  /* --------------------------------------------------------------- */
+  useEffect(() => {
+    if (!isNativeShell()) return;
+    let listenerHandle;
+    let cancelled = false;
+    import("@capacitor/app").then(({ App: CapacitorApp }) => {
+      if (cancelled) return;
+      CapacitorApp.addListener("backButton", ({ canGoBack }) => {
+        if (canGoBack) {
+          window.history.back(); // triggers the existing popstate handler above, which pops whatever's on top of navBackStack (a tab, a modal, a popup) and closes just that
+        } else {
+          CapacitorApp.exitApp(); // stack is genuinely empty — this really is the Home screen, so actually exit
+        }
+      }).then((h) => { listenerHandle = h; });
+    }).catch((err) => {
+      console.warn("Native back-button handling unavailable — is @capacitor/app installed and synced?", err);
+    });
+    return () => { cancelled = true; if (listenerHandle) listenerHandle.remove(); };
+  }, []);
+
   /* Auto-logout the instant a technician's role-specific window ends —
      Indoor/Outdoor Technician sessions only. Admin and Front Desk are
      exempt (they may need to work past the window to close out the day).
